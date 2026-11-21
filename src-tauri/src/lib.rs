@@ -5,6 +5,7 @@ mod device;
 mod fdt;
 mod flash;
 mod ingest;
+mod overlay;
 mod rea;
 mod sparse_image;
 mod stock;
@@ -25,6 +26,7 @@ pub fn run() {
             rea::analyze_blobs,
             rea::patch_blob,
             rea::carve_firmware,
+            overlay::build_overlay,
             flash::recommend_track,
             flash::flash_plan,
             flash::preflight,
