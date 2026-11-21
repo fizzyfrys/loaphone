@@ -953,10 +953,7 @@ fn build_at(w: &Path, p: &BuildParams, progress: &dyn Fn(String)) -> Result<Buil
         sparse_path,
     };
     // Only publish successful builds; failed builds leave the previous output intact.
-    if output.exists() {
-        fs::remove_file(&output).map_err(err)?;
-    }
-    fs::rename(&image_path, &output).map_err(err)?;
+    publish_raw(&image_path, &output)?;
     let sparse_output = root.join("rootfs.sparse.img");
     if sparse_output.exists() {
         fs::remove_file(&sparse_output).map_err(err)?;
@@ -972,6 +969,10 @@ fn build_at(w: &Path, p: &BuildParams, progress: &dyn Fn(String)) -> Result<Buil
     fs::remove_dir_all(work).map_err(err)?;
     progress(format!("Rootfs ready: {}", output.display()));
     Ok(report)
+}
+
+fn publish_raw(staged: &Path, output: &Path) -> Result<(), String> {
+    fs::rename(staged, output).map_err(err)
 }
 
 #[tauri::command]
@@ -1117,6 +1118,19 @@ mod tests {
         assert!(quote("/a\nwrite bad").is_err());
         assert!(quote("/a\"b").is_err());
         assert_eq!(quote("/path with spaces").unwrap(), "\"/path with spaces\"");
+    }
+
+    #[test]
+    fn raw_publication_preserves_previous_on_failure() {
+        let dir = TestDir::new();
+        let output = dir.0.join("rootfs.img");
+        let staged = dir.0.join("staged.img");
+        fs::write(&output, "previous").unwrap();
+        assert!(publish_raw(&staged, &output).is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"previous");
+        fs::write(&staged, "replacement").unwrap();
+        publish_raw(&staged, &output).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"replacement");
     }
 
     fn tools_available() -> bool {
