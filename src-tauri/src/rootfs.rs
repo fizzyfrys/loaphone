@@ -591,10 +591,23 @@ fn validate_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn ssh_directive(line: &str) -> Option<String> {
+    let mut keyword = String::new();
+    let mut quoted = false;
+    for c in line.trim_start().chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '\\' | '\'' => return None,
+            c if !quoted && (c.is_whitespace() || c == '=' || c == '#') => break,
+            c => keyword.push(c),
+        }
+    }
+    (!quoted).then_some(keyword)
+}
+
 fn root_key_config(config: &str) -> Result<String, String> {
     for line in config.lines() {
-        let directive = line.trim().split(|c: char| c.is_whitespace() || c == '=')
-            .next().unwrap_or("");
+        let directive = ssh_directive(line).ok_or("SSH public key not installed: ambiguous sshd_config quoting; configuration and authorized_keys were left unchanged. The key may not work.")?;
         if directive.eq_ignore_ascii_case("Match") || directive.eq_ignore_ascii_case("Include") {
             return Err("SSH public key not installed: existing Match/Include policy is ambiguous; sshd_config and authorized_keys were left unchanged. The key may not work.".into());
         }
@@ -1238,6 +1251,10 @@ mod tests {
         for config in [
             format!("PermitRootLogin no\nPubkeyAuthentication no\nInclude {}\n", included.display()),
             "PubkeyAuthentication no\nMatch User root\n PermitRootLogin no\n".into(),
+            "PubkeyAuthentication no\n\"Match\" User \"root\"\n PermitRootLogin no\n".into(),
+            "PubkeyAuthentication no\nmAtCh=User \"root\"\n PermitRootLogin no\n".into(),
+            format!("PermitRootLogin no\n\"Include\" \"{}\"\n", included.display()),
+            format!("PermitRootLogin no\niNcLuDe=\"{}\"\n", included.display()),
         ] {
             fs::write(&config_file, &config).unwrap();
             let root = policy("root");
@@ -1248,6 +1265,23 @@ mod tests {
             assert_eq!(policy("alice"), alice);
             assert!(root.lines().any(|line| line == "permitrootlogin no"));
         }
+    }
+
+    #[test]
+    fn ssh_directive_quoting_and_separators() {
+        for line in ["\"Match\" User root", "Match User \"root\"", "mAtCh=User root", "\t\"mAtCh\"=User root"] {
+            assert!(ssh_directive(line).unwrap().eq_ignore_ascii_case("Match"));
+            assert!(root_key_config(line).is_err());
+        }
+        for line in ["\"Include\" \"/etc/ssh/*.conf\"", "iNcLuDe=\"/etc/ssh/*.conf\""] {
+            assert!(ssh_directive(line).unwrap().eq_ignore_ascii_case("Include"));
+            assert!(root_key_config(line).is_err());
+        }
+        for line in ["", "# \"Match\" User root", "  #Include=ignored"] {
+            assert!(root_key_config(line).is_ok());
+        }
+        assert!(root_key_config("\"Match User root").is_err());
+        assert!(root_key_config("'Match' User root").is_err());
     }
 
     fn tools_available() -> bool {
