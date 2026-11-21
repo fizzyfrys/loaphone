@@ -110,7 +110,7 @@ pub async fn preflight(
             let p=crate::device::parse_getprop(&props);let b=command("adb", &["-s",&serial,"shell","dumpsys","battery"]).unwrap_or_default();
             let battery=b.lines().find_map(|l|l.trim().strip_prefix("level:").and_then(|s|s.trim().parse::<u32>().ok()));
             if command("adb", &["-s",&serial,"shell","su","-c","id"]).map(|s|s.contains("uid=0")).unwrap_or(false){
-                let dest=w.join("backup");std::fs::create_dir_all(&dest).map_err(|e|e.to_string())?;
+                let dest=crate::common::backup_dir(&w,&serial)?;std::fs::create_dir_all(&dest).map_err(|e|e.to_string())?;
                 for part in ["efs","persist","modemst1","modemst2"] {
                     let remote=format!("/data/local/tmp/loaphone-{part}.img");
                     let result=command("adb", &["-s",&serial,"shell",&format!("su -c 'dd if=/dev/block/by-name/{part} of={remote}'")]).and_then(|_|command("adb", &["-s",&serial,"pull",&remote,dest.join(format!("{part}.img")).to_str().ok_or("Invalid path")?]));
@@ -123,7 +123,7 @@ pub async fn preflight(
             backups.push("Skipped backups: device is in fastboot, adb root required".into());
             (p.get("battery-soc-ok").and_then(|_|None::<u32>),p.get("unlocked").map(|s|s=="yes"||s=="true").unwrap_or(false))
         };
-        let user_backup=w.join("backup/user-data/summary.json").is_file();
+        let user_backup=crate::common::backup_dir(&w,&serial)?.join("user-data/summary.json").is_file();
         Ok(serde_json::json!({"battery":battery,"battery_ok":battery.map(|b|b>50).unwrap_or(false),"unlocked":unlocked,"backups":backups,"user_backup":user_backup,"backup_warning":if user_backup{"Verify your backup before continuing"}else{"No user data backup found. Use Backup my data before flashing."},"note":"Unknown battery level is not a pass. Fastboot voltage cannot reliably determine percentage."}))
     }).await.map_err(|e|e.to_string())?
 }

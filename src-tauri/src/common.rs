@@ -23,6 +23,13 @@ pub fn log(app: &tauri::AppHandle, stage: &str, line: impl AsRef<str>) {
         serde_json::json!({"stage":stage,"line":line.as_ref()}),
     );
 }
+pub fn backup_dir(workspace: &std::path::Path, serial: &str) -> Result<PathBuf, String> {
+    if serial.is_empty() || serial.len() > 100 {
+        return Err("Device serial must contain between 1 and 100 bytes".into());
+    }
+    let key: String = serial.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    Ok(workspace.join("backup").join(key))
+}
 pub fn command(tool: &str, args: &[&str]) -> Result<String, String> {
     let out = Command::new(tool).args(args).output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {

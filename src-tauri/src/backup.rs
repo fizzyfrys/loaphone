@@ -97,7 +97,7 @@ pub async fn backup_data(
     include_apks: bool,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let w=workspace(&app,&codename)?;let dir=w.join("backup/user-data");fs::create_dir_all(&dir).map_err(|e|e.to_string())?;let mut results=vec![];let mut saved=0;
+        let w=workspace(&app,&codename)?;let dir=crate::common::backup_dir(&w,&serial)?.join("user-data");fs::create_dir_all(&dir).map_err(|e|e.to_string())?;let mut results=vec![];let mut saved=0;
         for name in folders {if !["DCIM","Pictures","Movies","Music","Documents","Download"].contains(&name.as_str()){return Err("Invalid backup folder".into());}log(&app,"backup",format!("Copying {name}"));let r=command("adb", &["-s",&serial,"pull",&format!("/sdcard/{name}"),dir.join(&name).to_str().ok_or("Invalid path")?]);if r.is_ok(){saved+=1;}results.push(serde_json::json!({"source":name,"status":r.map(|_|"saved".into()).unwrap_or_else(|e|e)}));}
         for (name,uri) in [("contacts","content://com.android.contacts/data"),("sms","content://sms"),("calls","content://call_log/calls")] {
             log(&app,"backup",format!("Exporting {name}; Android may deny access"));

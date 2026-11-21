@@ -37,8 +37,8 @@ Workspaces live under the OS app data directory for `com.fizzyfrys.loaphone`, wi
   blobs/                 extracted libraries and firmware
   images/                imported partition images
   dump/                  hardware evidence and summary.json
-  backup/user-data/      media, content-provider rows, packages and optional APKs
-  backup/                readable EFS / persist / modemst copies
+  backup/<hex-serial>/user-data/   media, content-provider rows, packages and optional APKs
+  backup/<hex-serial>/            readable EFS / persist / modemst copies
   patched/               modified copies only
   lib/firmware/          exported standalone firmware
   report.json
