@@ -77,10 +77,16 @@ pub async fn export_dump(app: tauri::AppHandle, codename: String) -> Result<Stri
     .map_err(|e| e.to_string())?
 }
 pub fn parse_content_rows(s: &str) -> Vec<serde_json::Value> {
-    s.lines()
-        .filter(|l| l.starts_with("Row: "))
-        .map(|l| serde_json::json!({"raw":l}))
-        .collect()
+    let mut rows: Vec<String> = Vec::new();
+    for line in s.lines() {
+        if line.starts_with("Row: ") {
+            rows.push(line.to_owned());
+        } else if let Some(row) = rows.last_mut() {
+            row.push('\n');
+            row.push_str(line);
+        }
+    }
+    rows.into_iter().map(|row| serde_json::json!({"raw":row})).collect()
 }
 #[tauri::command]
 pub async fn backup_data(
@@ -113,5 +119,9 @@ mod tests {
             2
         );
         assert!(parse_content_rows("Permission Denial").is_empty());
+        let rows = parse_content_rows("Header\nRow: 0 body=hello\nworld\n\nlast\nRow: 1 body=next\ncontinued");
+        assert_eq!(rows[0]["raw"], "Row: 0 body=hello\nworld\n\nlast");
+        assert_eq!(rows[1]["raw"], "Row: 1 body=next\ncontinued");
+        assert!(parse_content_rows("").is_empty());
     }
 }
