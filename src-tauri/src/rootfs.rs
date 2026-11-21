@@ -328,6 +328,23 @@ fn extract_ext4(source: &Path, output: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn extract_root(source: &Path, work: &Path, output: &Path) -> Result<(), String> {
+    let mut input = File::open(source).map_err(err)?;
+    let mut magic = [0; 4];
+    input.read_exact(&mut magic).map_err(err)?;
+    if magic == crate::sparse_image::MAGIC {
+        input.rewind().map_err(err)?;
+        let raw = work.join("desparsed.img");
+        crate::sparse_image::expand(input, &mut File::create(&raw).map_err(err)?)
+            .map_err(err)?;
+        extract_ext4(&raw, output)?;
+        fs::remove_file(raw).map_err(err)?;
+        Ok(())
+    } else {
+        extract_ext4(source, output)
+    }
+}
+
 fn unpack(
     source: &Path,
     work: &Path,
@@ -347,7 +364,7 @@ fn unpack(
         if !status.success() {
             return Err(format!("xz failed: {status}"));
         }
-        extract_ext4(&expanded, output)?;
+        extract_root(&expanded, work, output)?;
         fs::remove_file(expanded).map_err(err)?;
     } else if name.ends_with(".zip") {
         let mut zip = zip::ZipArchive::new(File::open(source).map_err(err)?).map_err(err)?;
@@ -375,10 +392,10 @@ fn unpack(
         let mut entry = zip.by_index(candidates[0]).map_err(err)?;
         progress(format!("Extracting ZIP entry {}", entry.name()));
         std::io::copy(&mut entry, &mut File::create(&expanded).map_err(err)?).map_err(err)?;
-        extract_ext4(&expanded, output)?;
+        extract_root(&expanded, work, output)?;
         fs::remove_file(expanded).map_err(err)?;
     } else if name.ends_with(".img") {
-        extract_ext4(source, output)?;
+        extract_root(source, work, output)?;
     } else {
         return Err("Choose .img, .img.xz or .zip".into());
     }
@@ -1148,6 +1165,25 @@ mod tests {
                 .success()
         );
         image
+    }
+
+    #[test]
+    fn sparse_root_extraction() {
+        if !tools_available() || Command::new("img2simg").arg("--help").output().is_err() {
+            eprintln!("SKIP sparse root extraction: e2fsprogs/img2simg missing");
+            return;
+        }
+        let dir = TestDir::new();
+        let raw = tiny_image(&dir.0, false);
+        let sparse = dir.0.join("sparse.img");
+        assert!(Command::new("img2simg").arg(&raw).arg(&sparse).status().unwrap().success());
+        let output = dir.0.join("extracted.img");
+        unpack(&sparse, &dir.0, &output, &|_| {}).unwrap();
+        assert_eq!(sha256(&raw).unwrap(), sha256(&output).unwrap());
+        fs::write(&sparse, crate::sparse_image::MAGIC).unwrap();
+        assert!(unpack(&sparse, &dir.0, &output, &|_| {}).is_err());
+        fs::write(&sparse, []).unwrap();
+        assert!(unpack(&sparse, &dir.0, &output, &|_| {}).is_err());
     }
 
     fn params(source: &Path) -> BuildParams {
