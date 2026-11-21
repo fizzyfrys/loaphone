@@ -59,6 +59,18 @@ All optional tools are detected and missing tools are reported without crashing:
 
 Put tools on PATH. No tool other than patchelf is required for a plain ELF report. A library classified as Android-provided may still be absent or incompatible on your target rootfs. Tier 1 means a prioritized research target, not a guarantee of a working Linux port. Wiki links and mainline classifications should be checked against current upstream documentation.
 
+### Headless HAL analysis
+
+When [Rizin](https://rizin.re) or Ghidra's `analyzeHeadless` is installed, REA Inspector can run a headless pass over every ELF blob in the workspace and list, per blob:
+
+- ioctl call sites with the request number decoded into `_IOW('I', 0x01, 4)` form and the driver family (ION, KGSL, ALSA, V4L2, ...) where the magic is known,
+- firmware load paths and firmware file names (`.mdt`, `.mbn`, `.tlv`, `.b0x`, ...), plus `/dev` and `/sys` nodes,
+- hardware register candidates: page-aligned constants in the 16 MiB to 1 GiB physical window that fall outside the binary's own mapping.
+
+Rizin is preferred because it is fast; Ghidra is used when Rizin is absent (set `GHIDRA_INSTALL_DIR`, Ghidra needs JDK 25+). Force a backend with `LOAPHONE_DECOMPILER=rizin|ghidra|none`. Neither tool is bundled; without them the app says so and the ELF inventory still works. Results are written to `headless.json` in the workspace.
+
+Tests use vendor blobs from the public LineageOS 22.2 `sargo` build (`src-tauri/tests/fixtures/lineage-sargo`) and a synthetic HAL built from `tests/fixtures/synthetic/hal_probe.c`. Rizin tests are skipped when it is not on PATH unless `LOAPHONE_REQUIRE_RIZIN=1`; the Ghidra test runs with `LOAPHONE_TEST_GHIDRA=1`.
+
 ## Safety and current limits
 
 - Dry run is on by default. Planning never executes flashing commands. Confirmation must match the device codename. Linux flash execution also verifies fastboot product, unlock state and battery percentage above 50%. If a bootloader only exposes voltage, execution is refused rather than guessing battery health.
@@ -73,7 +85,7 @@ Put tools on PATH. No tool other than patchelf is required for a plain ELF repor
 
 ## Roadmap
 
-- Ghidra / rizin headless HAL analysis and reproducible REA jobs
+- Reproducible REA jobs
 - DTS to mainline conversion and device-tree comparison
 - udev rule generation from ueventd.rc
 - Rootfs building, server / Wi-Fi provisioning and device-specific installation recipes

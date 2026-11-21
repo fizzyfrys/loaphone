@@ -20,10 +20,18 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf build-essential pkg-config
       - run: npm ci
+      - name: Rizin for headless REA tests
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -o /tmp/rizin.tar.xz https://github.com/rizinorg/rizin/releases/download/v0.9.1/rizin-v0.9.1-static-x86_64.tar.xz
+          sudo mkdir -p /opt/rizin && sudo tar -xJf /tmp/rizin.tar.xz -C /opt/rizin
+          echo /opt/rizin/bin >> "$GITHUB_PATH"
       - name: Rust tests
         if: runner.os == 'Linux'
         working-directory: src-tauri
-        run: cargo test
+        env:
+          LOAPHONE_REQUIRE_RIZIN: "1"
+        run: rizin -v && cargo test
       - uses: tauri-apps/tauri-action@v0
       - uses: actions/upload-artifact@v4
         with:
