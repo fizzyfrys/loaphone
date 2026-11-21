@@ -93,6 +93,30 @@ fn provided_libraries(blobs: &[Blob]) -> BTreeSet<(u16, u8, String)> {
 fn has_provider(provided: &BTreeSet<(u16, u8, String)>, blob: &Blob, name: &str) -> bool {
     provided.contains(&(blob.machine, blob.elf_class, name.to_owned()))
 }
+
+#[derive(Serialize)]
+struct UnpackedFile {
+    path: String,
+    bytes: u64,
+}
+
+fn unpacked_files(root: &Path) -> Result<Vec<UnpackedFile>, String> {
+    let mut files = vec![];
+    if root.is_dir() {
+        for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.file_type().is_file() {
+                let relative = entry.path().strip_prefix(root).map_err(|e| e.to_string())?;
+                files.push(UnpackedFile {
+                    path: relative.components().map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>().join("/"),
+                    bytes: entry.metadata().map_err(|e| e.to_string())?.len(),
+                });
+            }
+        }
+    }
+    Ok(files)
+}
 #[tauri::command]
 pub async fn analyze_blobs(
     app: tauri::AppHandle,
@@ -110,7 +134,8 @@ pub async fn analyze_blobs(
         let system=["libc.so","libm.so","libdl.so","liblog.so","libcutils.so","libutils.so","libbinder.so","libandroid.so","libz.so","libstdc++.so","libbase.so","libhardware.so","libsync.so","libnativewindow.so","libEGL.so","libGLESv2.so"];
         let mut counts=BTreeMap::<String,usize>::new();let mut edges=vec![];let mut missing=BTreeSet::new();
         for b in &mut blobs { *counts.entry(b.category.clone()).or_default()+=1;for n in &b.needed {let resolved=has_provider(&provided,b,n)||system.contains(&n.as_str());edges.push(serde_json::json!({"from":b.path,"to":n,"resolved":resolved}));if !resolved{b.missing.push(n.clone());missing.insert(n.clone());}} }
-        let report=serde_json::json!({"counts":counts,"blobs":blobs,"edges":edges,"missing":missing,"warnings":warnings});
+        let unpacked=unpacked_files(&w.join("unpacked"))?;
+        let report=serde_json::json!({"counts":counts,"blobs":blobs,"edges":edges,"missing":missing,"warnings":warnings,"unpacked":unpacked});
         fs::write(w.join("report.json"),serde_json::to_vec_pretty(&report).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;Ok(report)
     }).await.map_err(|e|e.to_string())?
 }
@@ -216,6 +241,20 @@ fn copy_firmware_layout(root: &Path, destination: &Path, overlay: bool) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventories_unpacked_files_separately_from_blobs() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().join("unpacked");
+        assert!(unpacked_files(&root).unwrap().is_empty());
+        let boot = root.join("rom/boot.img");
+        fs::create_dir_all(&boot).unwrap();
+        fs::write(boot.join("kernel.config"), b"CONFIG_IKCONFIG=y").unwrap();
+        let files = unpacked_files(&root).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "rom/boot.img/kernel.config");
+        assert_eq!(files[0].bytes, 17);
+    }
     #[test]
     fn architecture_scoped_providers() {
         let mut blob = Blob { path:"vendor/lib/libexample.so".into(),arch:"ARM".into(),machine:40,elf_class:1,soname:Some("libalias.so".into()),needed:vec![],rpath:vec![],undefined:0,bionic:false,category:"Other".into(),missing:vec![] };
