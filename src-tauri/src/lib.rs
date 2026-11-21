@@ -1,6 +1,7 @@
 mod backup;
 mod boot_image;
 mod common;
+mod decomp;
 mod device;
 mod fdt;
 mod flash;
@@ -24,6 +25,8 @@ pub fn run() {
             ingest::ingest_archive,
             ingest::pull_from_device,
             rea::analyze_blobs,
+            decomp::decompiler_status,
+            decomp::headless_analyze,
             rea::patch_blob,
             rea::carve_firmware,
             overlay::build_overlay,
