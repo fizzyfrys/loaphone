@@ -1,9 +1,16 @@
 use crate::common::{command, log, workspace};
 use std::{fs, path::Path};
+use std::io::{Read, Result as IoResult};
+
+fn image_header(reader: impl Read) -> IoResult<Vec<u8>> {
+    let mut header = Vec::with_capacity(1082);
+    reader.take(1082).read_to_end(&mut header)?;
+    Ok(header)
+}
 
 fn extract_image(app: &tauri::AppHandle, image: &Path, out: &Path) -> Result<(), String> {
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    let data = fs::read(image).map_err(|e| e.to_string())?;
+    let data = image_header(fs::File::open(image).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let image = image.to_str().ok_or("Invalid image path")?;
     let out = out.to_str().ok_or("Invalid output path")?;
     let result = if data.get(1024..1028) == Some(&[0xe2, 0xe1, 0xf5, 0xe0]) {
@@ -25,6 +32,25 @@ fn extract_image(app: &tauri::AppHandle, image: &Path, out: &Path) -> Result<(),
     };
     log(app, "ingest", result?);
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn bounded_header() {
+        let mut bytes = vec![0; 4096];
+        bytes[1080..1082].copy_from_slice(&[0x53, 0xef]);
+        let mut reader = std::io::Cursor::new(bytes);
+        let header = image_header(&mut reader).unwrap();
+        assert_eq!(header.len(), 1082);
+        assert_eq!(reader.position(), 1082);
+        assert_eq!(&header[1080..], &[0x53, 0xef]);
+        assert!(image_header(&b""[..]).unwrap().is_empty());
+        assert_eq!(image_header(&b"short"[..]).unwrap(), b"short");
+        struct Broken;
+        impl Read for Broken { fn read(&mut self, _: &mut [u8]) -> IoResult<usize> { Err(std::io::Error::other("read failure")) } }
+        assert!(image_header(Broken).is_err());
+    }
 }
 #[tauri::command]
 pub async fn ingest_archive(
