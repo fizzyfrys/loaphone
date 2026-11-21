@@ -1216,6 +1216,7 @@ mod tests {
     #[test]
     fn root_key_policy_effective_for_root_only() {
         if Command::new("sshd").arg("-V").output().is_err() {
+            assert!(std::env::var_os("CI").is_none(), "sshd is required in CI for effective SSH policy tests; install openssh-server");
             eprintln!("SKIP effective SSH policy: sshd missing");
             return;
         }
