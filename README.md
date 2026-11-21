@@ -91,7 +91,7 @@ Put tools on PATH. No tool other than patchelf is required for a plain ELF repor
 ## Rootfs builder
 
 Use the **Rootfs builder** screen after exporting an overlay in REA Inspector.
-On Ubuntu install `e2fsprogs xz-utils android-sdk-libsparse-utils`. No root,
+The builder requires a Linux host. On Ubuntu install `e2fsprogs xz-utils android-sdk-libsparse-utils`. No root,
 mounts, chroot or qemu are used. The builder streams downloads into the device
 workspace cache, checks published SHA-256 when available, extracts raw ext4
 (or the root ext4 partition of a 512-byte-sector MBR/GPT disk), runs e2fsck and
@@ -101,7 +101,8 @@ existing files not replaced by the overlay/profile keep their ownership.
 Outputs from failed builds do not replace the previous successful raw image.
 Allow several times the compressed size in free disk space; there is no quota
 or build cancellation. LUKS, LVM, extended MBR and ambiguous multi-root images
-require manual extraction. Android sparse *output* is optional; input is raw.
+require manual extraction. Android sparse sources are expanded with the shared
+Rust decoder before ext4 extraction; Android sparse output is optional.
 Current pmOS images can require e2fsprogs 1.47 or newer (Ubuntu 22.04's 1.46.5
 rejects the orphan-file feature). Put a recent e2fsprogs installation on PATH;
 the builder fails with the tool's diagnostic rather than stripping filesystem features.
