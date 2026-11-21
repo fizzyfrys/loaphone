@@ -52,12 +52,12 @@ struct Sections<'a> {
 impl<'a> Sections<'a> {
     fn new(image: &'a [u8], header_size: usize, page: usize) -> io::Result<Self> {
         region(image, 0, header_size)?;
-        if page < header_size || !page.is_power_of_two() {
+        if !page.is_power_of_two() {
             return Err(invalid("Invalid boot image page size"));
         }
         Ok(Self {
             image,
-            offset: page,
+            offset: padded(header_size, page)?,
             page,
         })
     }
@@ -469,15 +469,24 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn vendor_sample(version: usize) -> Vec<u8> {
-        let mut image = vec![0; PAGE];
+        vendor_sample_with_page(version, PAGE)
+    }
+
+    fn vendor_sample_with_page(version: usize, page: usize) -> Vec<u8> {
+        let header_size = if version == 3 { 2112usize } else { 2128 };
+        let mut image = vec![0; header_size.next_multiple_of(page)];
+        let append = |image: &mut Vec<u8>, section: &[u8]| {
+            image.extend_from_slice(section);
+            image.resize(image.len().next_multiple_of(page), 0);
+        };
         image[..8].copy_from_slice(VENDOR);
         let ramdisk = b"one two";
         let dtb = fdt::tests::sample();
         let trees = [dtb.as_slice(), dtb.as_slice()].concat();
         le_at(&mut image, 8, version);
-        le_at(&mut image, 12, PAGE);
+        le_at(&mut image, 12, page);
         le_at(&mut image, 24, ramdisk.len());
-        le_at(&mut image, 2096, if version == 3 { 2112 } else { 2128 });
+        le_at(&mut image, 2096, header_size);
         le_at(&mut image, 2100, trees.len());
         append(&mut image, ramdisk);
         append(&mut image, &trees);
@@ -555,6 +564,27 @@ pub(crate) mod tests {
         );
         bytes[36..40].copy_from_slice(&0u32.to_be_bytes());
         assert!(dt_table(&bytes, out.path(), "dtbo").is_err());
+    }
+
+    #[test]
+    fn review_regression_vendor_boot_header_spans_two_pages() {
+        for version in [3, 4] {
+            let out = tempfile::tempdir().unwrap();
+            let bytes = vendor_sample_with_page(version, 2048);
+            assert!(vendor_boot(&bytes, out.path()).unwrap().contains("2 DTS"));
+            assert_eq!(
+                fs::read(out.path().join("vendor-ramdisk")).unwrap(),
+                b"one two"
+            );
+            assert!(out.path().join("vendor-dtb-1.dts").is_file());
+            if version == 4 {
+                assert_eq!(
+                    fs::read(out.path().join("vendor-ramdisk-1")).unwrap(),
+                    b"two"
+                );
+                assert_eq!(fs::read(out.path().join("bootconfig")).unwrap(), b"x=y");
+            }
+        }
     }
 
     #[test]
