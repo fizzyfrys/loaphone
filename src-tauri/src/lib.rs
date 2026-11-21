@@ -1,10 +1,14 @@
 mod backup;
+mod boot_image;
 mod common;
 mod decomp;
 mod device;
+mod fdt;
 mod flash;
 mod ingest;
+mod overlay;
 mod rea;
+mod sparse_image;
 mod stock;
 mod support;
 mod tools;
@@ -25,6 +29,7 @@ pub fn run() {
             decomp::headless_analyze,
             rea::patch_blob,
             rea::carve_firmware,
+            overlay::build_overlay,
             flash::recommend_track,
             flash::flash_plan,
             flash::preflight,
