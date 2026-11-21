@@ -361,7 +361,8 @@ pub fn track_function(
         let base = mnem.trim_end_matches(".w");
         let reads_only = ["cmp", "cmn", "tst", "teq", "cbz", "cbnz", "tbz", "tbnz", "push"]
             .contains(&base)
-            || (base.starts_with("st") && !base.starts_with("stx") && !base.starts_with("stlx"));
+            || (base.starts_with("st")
+                && !["stx", "stlx", "strex", "stlex"].iter().any(|p| base.starts_with(p)));
         if reads_only {
             continue;
         }
@@ -896,12 +897,22 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn timeout_kills_the_whole_process_group() {
+        let pidfile = private_temp_dir().unwrap().join("pid");
         let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sleep 30 & echo $!; wait"]);
-        let start = Instant::now();
+        cmd.arg("-c")
+            .arg(format!("sleep 30 & echo $! > {}; wait", pidfile.display()));
         let err = run_with_timeout(cmd, Duration::from_millis(300)).unwrap_err();
         assert!(err.starts_with("timed out"), "{err}");
-        assert!(start.elapsed() < Duration::from_secs(10), "grandchild kept stdout open");
+        let pid = fs::read_to_string(&pidfile).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        fs::remove_dir_all(pidfile.parent().unwrap()).unwrap();
+        assert!(!alive, "background sleep {pid} survived the timeout");
     }
 
     #[test]
@@ -930,6 +941,17 @@ mod tests {
         .unwrap();
         assert!(classify("a.so", raw).truncated);
         assert!(!classify("b.so", RawScan::default()).truncated);
+    }
+
+    #[test]
+    fn exclusive_store_status_register_is_not_a_constant() {
+        let ops: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {"offset":0,"type":"mov","opcode":"movw r1, 0x5003"},
+            {"offset":4,"type":"store","opcode":"strex r1, r2, [r3]"},
+            {"offset":8,"type":"call","opcode":"blx 0x3b8","jump":952}
+        ]"#).unwrap();
+        let (i, _) = track_function("f", &ops, &[(0x3b4, 0x3bc)], true, &|_| None);
+        assert_eq!(i[0].request, None);
     }
 
     #[test]
