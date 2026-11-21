@@ -590,6 +590,10 @@ fn validate_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn root_key_config(config: &str) -> String {
+    format!("PermitRootLogin prohibit-password\nPubkeyAuthentication yes\n{config}")
+}
+
 fn profile(image: &Image<'_>, work: &Path, key: Option<&str>) -> Result<Vec<String>, String> {
     let mut actions = Vec::new();
     let pmos_usb = image
@@ -675,21 +679,8 @@ fn profile(image: &Image<'_>, work: &Path, key: Option<&str>) -> Result<Vec<Stri
             ),
             0o600,
         )?;
-        image.text(
-            work,
-            "/etc/ssh/sshd_config.d/00-loaphone-key.conf",
-            "PermitRootLogin prohibit-password\nPubkeyAuthentication yes\n",
-            0o600,
-        )?;
         let config = image.read("cat /etc/ssh/sshd_config")?;
-        if !config.contains("Include /etc/ssh/sshd_config.d/") {
-            image.text(
-                work,
-                "/etc/ssh/sshd_config",
-                &format!("Include /etc/ssh/sshd_config.d/*.conf\n{config}"),
-                0o600,
-            )?;
-        }
+        image.text(work, "/etc/ssh/sshd_config", &root_key_config(&config), 0o600)?;
         actions.push("Appended public key for root (root-owned 0700 .ssh / 0600 authorized_keys); enabled key-only root SSH. Existing distro user accounts unchanged.".into());
     }
     Ok(actions)
@@ -1166,6 +1157,21 @@ mod tests {
         assert_eq!(local_source(&source, &dir.0).unwrap(), source);
         assert!(local_source(&dir.0.join("missing"), &dir.0).is_err());
         assert_eq!(fs::read(&output).unwrap(), b"original");
+    }
+
+    #[test]
+    fn root_key_settings_precede_existing_directives() {
+        for config in [
+            "",
+            "#Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin no\n",
+            "PermitRootLogin no\nPubkeyAuthentication no\nInclude /etc/ssh/sshd_config.d/*.conf\n",
+            "Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin no\n",
+            "Match User root\n PermitRootLogin no\n",
+        ] {
+            let updated = root_key_config(config);
+            assert!(updated.starts_with("PermitRootLogin prohibit-password\nPubkeyAuthentication yes\n"));
+            assert!(updated.ends_with(config));
+        }
     }
 
     fn tools_available() -> bool {
