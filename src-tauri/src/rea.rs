@@ -35,7 +35,7 @@ pub fn category(path: &str) -> String {
     }
     "Other".into()
 }
-fn firmware(path: &str) -> bool {
+pub(crate) fn firmware(path: &str) -> bool {
     let p = path.to_lowercase();
     let ext = Path::new(&p)
         .extension()
