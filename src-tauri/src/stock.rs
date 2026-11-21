@@ -1,6 +1,12 @@
 use crate::common::{command, log, workspace};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
+fn archive_key(path: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
 #[derive(Serialize, Deserialize)]
 pub struct StockPlan {
     pub vendor: String,
@@ -50,9 +56,8 @@ pub async fn stock_plan(
         let mut commands=vec![];
         if vendor=="Pixel" {
             let source=Path::new(&path).canonicalize().map_err(|e|e.to_string())?;
-            let archive_key=source.to_string_lossy().as_bytes().iter().map(|b|format!("{b:02x}")).collect::<String>();
             let imports=w.join("stock");fs::create_dir_all(&imports).map_err(|e|e.to_string())?;
-            let dir=imports.join(archive_key);
+            let dir=imports.join(archive_key(&source));
             if dir.exists(){fs::remove_dir_all(&dir).map_err(|e|e.to_string())?;}
             fs::create_dir(&dir).map_err(|e|e.to_string())?;unzip(&source,&dir)?;
             let mut bootloader=None;let mut radio=None;let mut update=None;
@@ -119,6 +124,15 @@ pub async fn run_stock(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn long_archive_path_key() {
+        let path = format!("/home/owner/{}/factory.zip", "long-directory/".repeat(40));
+        let key = archive_key(Path::new(&path));
+        assert_eq!(key.len(), 16);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(key, archive_key(Path::new(&path)));
+        assert_ne!(key, archive_key(Path::new("/other/factory.zip")));
+    }
     #[test]
     fn edl() {
         assert!(parse_edl("Bus 001 Device 002: ID 05c6:9008 Qualcomm"));
