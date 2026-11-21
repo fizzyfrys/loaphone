@@ -94,7 +94,7 @@ Use the **Rootfs builder** screen after exporting an overlay in REA Inspector.
 The builder requires a Linux host. On Ubuntu install `e2fsprogs xz-utils android-sdk-libsparse-utils`. No root,
 mounts, chroot or qemu are used. The builder streams downloads into the device
 workspace cache, checks published SHA-256 when available, extracts raw ext4
-(or the root ext4 partition of a 512-byte-sector MBR/GPT disk), runs e2fsck and
+(or the root ext4 partition of an MBR/GPT disk, including 4096-byte-sector GPT), runs e2fsck and
 resize2fs, then uses debugfs to apply overlay files and profile settings to a
 copy. Default added capacity is 512 MiB. Added files are explicitly root-owned;
 existing files not replaced by the overlay/profile keep their ownership.

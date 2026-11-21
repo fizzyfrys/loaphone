@@ -222,11 +222,11 @@ fn ext4_at(f: &mut File, start: u64, length: u64) -> bool {
             .is_ok_and(|v| v[56..58] == [0x53, 0xef] && le32(&v[96..100]) & 0x40 != 0)
 }
 
-fn region(start_lba: u64, sectors: u64, disk_len: u64) -> Result<(u64, u64), String> {
+fn region(start_lba: u64, sectors: u64, disk_len: u64, sector_size: u64) -> Result<(u64, u64), String> {
     let start = start_lba
-        .checked_mul(512)
+        .checked_mul(sector_size)
         .ok_or("Partition offset overflow")?;
-    let length = sectors.checked_mul(512).ok_or("Partition size overflow")?;
+    let length = sectors.checked_mul(sector_size).ok_or("Partition size overflow")?;
     if start == 0 || length == 0 || start.checked_add(length).is_none_or(|end| end > disk_len) {
         return Err("Partition outside image bounds".into());
     }
@@ -240,12 +240,13 @@ fn partitions(f: &mut File) -> Result<Vec<(u64, u64)>, String> {
         return Err("Not raw ext4 or an MBR/GPT disk image".into());
     }
     if (0..4).any(|i| mbr[446 + i * 16 + 4] == 0xee) {
-        let header = read_at(f, 512, 512)?;
-        if &header[..8] != b"EFI PART" {
-            return Err("Invalid GPT header".into());
-        }
+        let (sector_size, header) = [512, 4096].into_iter().find_map(|sector_size| {
+            read_at(f, sector_size, 512).ok()
+                .filter(|header| &header[..8] == b"EFI PART")
+                .map(|header| (sector_size, header))
+        }).ok_or("Invalid GPT header (expected 512 or 4096 byte sectors)")?;
         let table = le64(&header[72..80])
-            .checked_mul(512)
+            .checked_mul(sector_size)
             .ok_or("GPT offset overflow")?;
         let count = le32(&header[80..84]);
         let entry_size = le32(&header[84..88]);
@@ -269,7 +270,7 @@ fn partitions(f: &mut File) -> Result<Vec<(u64, u64)>, String> {
                 .checked_sub(start)
                 .and_then(|n| n.checked_add(1))
                 .ok_or("Invalid GPT partition range")?;
-            result.push(region(start, sectors, size)?);
+            result.push(region(start, sectors, size, sector_size)?);
         }
         Ok(result)
     } else {
@@ -282,7 +283,7 @@ fn partitions(f: &mut File) -> Result<Vec<(u64, u64)>, String> {
             if [0x05, 0x0f, 0x85].contains(&entry[4]) {
                 return Err("Extended MBR partitions are not supported".into());
             }
-            result.push(region(le32(&entry[8..12]), le32(&entry[12..16]), size)?);
+            result.push(region(le32(&entry[8..12]), le32(&entry[12..16]), size, 512)?);
         }
         Ok(result)
     }
@@ -1079,6 +1080,32 @@ mod tests {
         d[4096 + 1080..4096 + 1082].copy_from_slice(&[0x53, 0xef]);
         d[4096 + 1120] = 0x40;
         d
+    }
+
+    #[test]
+    fn gpt_with_4096_byte_sectors() {
+        let dir = TestDir::new();
+        let path = dir.0.join("disk.img");
+        let mut disk = vec![0; 64 * 4096];
+        disk[510..512].copy_from_slice(&[0x55, 0xaa]);
+        disk[450] = 0xee;
+        disk[4096..4104].copy_from_slice(b"EFI PART");
+        disk[4168..4176].copy_from_slice(&2u64.to_le_bytes());
+        disk[4176..4180].copy_from_slice(&1u32.to_le_bytes());
+        disk[4180..4184].copy_from_slice(&128u32.to_le_bytes());
+        disk[8192] = 1;
+        disk[8224..8232].copy_from_slice(&8u64.to_le_bytes());
+        disk[8232..8240].copy_from_slice(&39u64.to_le_bytes());
+        disk[32768 + 1080..32768 + 1082].copy_from_slice(&[0x53, 0xef]);
+        disk[32768 + 1120] = 0x40;
+        fs::write(&path, &disk).unwrap();
+        assert_eq!(partitions(&mut File::open(&path).unwrap()).unwrap(), vec![(32768, 131072)]);
+        let output = dir.0.join("root.img");
+        extract_ext4(&path, &output).unwrap();
+        assert_eq!(fs::metadata(output).unwrap().len(), 131072);
+        disk[8232..8240].copy_from_slice(&u64::MAX.to_le_bytes());
+        fs::write(&path, disk).unwrap();
+        assert!(partitions(&mut File::open(&path).unwrap()).is_err());
     }
 
     #[test]
