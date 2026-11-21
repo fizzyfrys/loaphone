@@ -1,4 +1,4 @@
-use crate::{common::workspace, rea::copy_firmware};
+use crate::{common::workspace, rea::copy_overlay_firmware};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -229,7 +229,8 @@ pub fn build_overlay_at(w: &Path) -> Result<OverlayReport, String> {
     fs::create_dir_all(&rules_dir).map_err(|e| e.to_string())?;
     fs::write(rules_dir.join("99-loaphone-android.rules"), &rules_text)
         .map_err(|e| e.to_string())?;
-    let firmware_count = copy_firmware(&blobs, &overlay.join("lib/firmware"))?;
+    let (firmware_count, firmware_skipped) = copy_overlay_firmware(&blobs, &overlay.join("lib/firmware"))?;
+    skipped.extend(firmware_skipped);
     let zip_path = w.join("overlay.zip");
     let mut zip = zip::ZipWriter::new(fs::File::create(&zip_path).map_err(|e| e.to_string())?);
     for entry in walkdir::WalkDir::new(&overlay).sort_by_file_name() {
@@ -341,6 +342,37 @@ mod tests {
     }
 
     #[test]
+    fn firmware_layout_and_collisions() {
+        let w = std::env::temp_dir().join(format!("loaphone-firmware-{}", std::process::id()));
+        let blobs = w.join("blobs");
+        for (name, data) in [
+            ("odm/firmware/modem.mdt", "first"),
+            ("vendor/firmware/modem.mdt", "second"),
+            ("vendor/firmware/qcom/a660_zap.b00", "zap"),
+            ("firmware_mnt/image/qcom/radio.mbn", "radio"),
+            ("vendor/firmware/old/firmware/nested.bin", "nested"),
+        ] {
+            let file = blobs.join(name);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, data).unwrap();
+        }
+        let dest = w.join("overlay/lib/firmware");
+        let (count, skipped) = copy_overlay_firmware(&blobs, &dest).unwrap();
+        assert_eq!(count, 4);
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("vendor/firmware/modem.mdt skipped"));
+        assert!(skipped[0].contains("odm/firmware/modem.mdt already supplies modem.mdt"));
+        assert_eq!(fs::read_to_string(dest.join("modem.mdt")).unwrap(), "first");
+        for name in ["qcom/a660_zap.b00", "qcom/radio.mbn", "nested.bin"] {
+            assert!(dest.join(name).is_file());
+        }
+        assert_eq!(crate::rea::copy_firmware(&blobs, &w.join("carved")).unwrap(), 5);
+        assert!(w.join("carved/vendor/firmware/modem.mdt").is_file());
+        assert!(w.join("carved/firmware_mnt/image/qcom/radio.mbn").is_file());
+        fs::remove_dir_all(w).unwrap();
+    }
+
+    #[test]
     fn builds_and_rebuilds_overlay() {
         let w = std::env::temp_dir().join(format!("loaphone-overlay-{}", std::process::id()));
         fs::create_dir_all(&w).unwrap();
@@ -379,7 +411,7 @@ mod tests {
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(
             &mut zip
-                .by_name("lib/firmware/vendor/firmware/modem.mdt")
+                .by_name("lib/firmware/modem.mdt")
                 .unwrap(),
             &mut bytes,
         )
@@ -391,7 +423,7 @@ mod tests {
         assert_eq!(rebuilt.firmware_count, 0);
         assert!(!w.join("overlay/stale").exists());
         assert!(
-            !w.join("overlay/lib/firmware/vendor/firmware/modem.mdt")
+            !w.join("overlay/lib/firmware/modem.mdt")
                 .exists()
         );
         fs::write(w.join("blobs/vendor/etc/init/device.rc"), [0xff]).unwrap();

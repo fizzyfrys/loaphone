@@ -172,18 +172,46 @@ pub async fn carve_firmware(app: tauri::AppHandle, codename: String) -> Result<S
     .map_err(|e| e.to_string())?
 }
 pub(crate) fn copy_firmware(root: &Path, destination: &Path) -> Result<usize, String> {
+    copy_firmware_layout(root, destination, false).map(|(count, _)| count)
+}
+pub(crate) fn copy_overlay_firmware(root: &Path, destination: &Path) -> Result<(usize, Vec<String>), String> {
+    copy_firmware_layout(root, destination, true)
+}
+fn copy_firmware_layout(root: &Path, destination: &Path, overlay: bool) -> Result<(usize, Vec<String>), String> {
     let mut count = 0;
-    if !root.exists() { return Ok(count); }
-    for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
+    let mut skipped = Vec::new();
+    let mut copied = BTreeMap::new();
+    if !root.exists() { return Ok((count, skipped)); }
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(root) {
         let entry = entry.map_err(|e| e.to_string())?;
         if entry.file_type().is_file() && firmware(&entry.path().to_string_lossy()) {
-            let dest = destination.join(entry.path().strip_prefix(root).map_err(|e| e.to_string())?);
-            fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
-            fs::copy(entry.path(), dest).map_err(|e| e.to_string())?;
-            count += 1;
+            files.push(entry.into_path());
         }
     }
-    Ok(count)
+    files.sort();
+    for file in files {
+        let relative = file.strip_prefix(root).map_err(|e| e.to_string())?;
+        let mut target = relative.to_path_buf();
+        if overlay {
+            let components: Vec<_> = relative.components().collect();
+            if let Some(index) = components.iter().rposition(|part| part.as_os_str() == "firmware") {
+                target = components[index + 1..].iter().collect();
+            } else if let Some(index) = components.windows(2).rposition(|parts| parts[0].as_os_str() == "firmware_mnt" && parts[1].as_os_str() == "image") {
+                target = components[index + 2..].iter().collect();
+            }
+            if let Some(first) = copied.get(&target) {
+                skipped.push(format!("Firmware collision: {} skipped; {} already supplies {}", relative.display(), first, target.display()));
+                continue;
+            }
+            copied.insert(target.to_path_buf(), relative.display().to_string());
+        }
+        let dest = destination.join(target);
+        fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+        fs::copy(&file, dest).map_err(|e| e.to_string())?;
+        count += 1;
+    }
+    Ok((count, skipped))
 }
 #[cfg(test)]
 mod tests {
