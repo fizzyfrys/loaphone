@@ -9,6 +9,8 @@ use std::{
 pub struct Blob {
     path: String,
     arch: String,
+    machine: u16,
+    elf_class: u8,
     soname: Option<String>,
     needed: Vec<String>,
     rpath: Vec<String>,
@@ -51,6 +53,8 @@ pub fn analyze_elf(path: &str, data: &[u8]) -> Result<Blob, String> {
     Ok(Blob {
         path: path.into(),
         arch: goblin::elf::header::machine_to_str(e.header.e_machine).into(),
+        machine: e.header.e_machine,
+        elf_class: e.header.e_ident[goblin::elf::header::EI_CLASS],
         soname: e.soname.map(str::to_string),
         rpath: e
             .rpaths
@@ -80,6 +84,15 @@ pub fn analyze_elf(path: &str, data: &[u8]) -> Result<Blob, String> {
         needed,
     })
 }
+fn provided_libraries(blobs: &[Blob]) -> BTreeSet<(u16, u8, String)> {
+    blobs.iter().filter(|b| b.elf_class != 0).flat_map(|b| {
+        [b.soname.clone(), Path::new(&b.path).file_name().map(|s| s.to_string_lossy().into_owned())]
+            .into_iter().flatten().map(|name| (b.machine, b.elf_class, name))
+    }).collect()
+}
+fn has_provider(provided: &BTreeSet<(u16, u8, String)>, blob: &Blob, name: &str) -> bool {
+    provided.contains(&(blob.machine, blob.elf_class, name.to_owned()))
+}
 #[tauri::command]
 pub async fn analyze_blobs(
     app: tauri::AppHandle,
@@ -91,12 +104,12 @@ pub async fn analyze_blobs(
             let entry=entry.map_err(|e|e.to_string())?;if !entry.file_type().is_file(){continue;}
             let p=entry.path().strip_prefix(&root).map_err(|e|e.to_string())?.to_string_lossy().to_string();
             let data=fs::read(entry.path()).map_err(|e|e.to_string())?;
-            if data.starts_with(b"\x7fELF") {match analyze_elf(&p,&data) {Ok(b)=>blobs.push(b),Err(e)=>warnings.push(format!("{p}: {e}"))}} else if firmware(&p) {blobs.push(Blob {path:p,arch:"firmware".into(),soname:None,needed:vec![],rpath:vec![],undefined:0,bionic:false,category:"Firmware".into(),missing:vec![]});}
+            if data.starts_with(b"\x7fELF") {match analyze_elf(&p,&data) {Ok(b)=>blobs.push(b),Err(e)=>warnings.push(format!("{p}: {e}"))}} else if firmware(&p) {blobs.push(Blob {path:p,arch:"firmware".into(),machine:0,elf_class:0,soname:None,needed:vec![],rpath:vec![],undefined:0,bionic:false,category:"Firmware".into(),missing:vec![]});}
         }
-        let provided:BTreeSet<String>=blobs.iter().flat_map(|b|[b.soname.clone(),Path::new(&b.path).file_name().map(|s|s.to_string_lossy().into_owned())]).flatten().collect();
+        let provided=provided_libraries(&blobs);
         let system=["libc.so","libm.so","libdl.so","liblog.so","libcutils.so","libutils.so","libbinder.so","libandroid.so","libz.so","libstdc++.so","libbase.so","libhardware.so","libsync.so","libnativewindow.so","libEGL.so","libGLESv2.so"];
         let mut counts=BTreeMap::<String,usize>::new();let mut edges=vec![];let mut missing=BTreeSet::new();
-        for b in &mut blobs { *counts.entry(b.category.clone()).or_default()+=1;for n in &b.needed {let resolved=provided.contains(n)||system.contains(&n.as_str());edges.push(serde_json::json!({"from":b.path,"to":n,"resolved":resolved}));if !resolved{b.missing.push(n.clone());missing.insert(n.clone());}} }
+        for b in &mut blobs { *counts.entry(b.category.clone()).or_default()+=1;for n in &b.needed {let resolved=has_provider(&provided,b,n)||system.contains(&n.as_str());edges.push(serde_json::json!({"from":b.path,"to":n,"resolved":resolved}));if !resolved{b.missing.push(n.clone());missing.insert(n.clone());}} }
         let report=serde_json::json!({"counts":counts,"blobs":blobs,"edges":edges,"missing":missing,"warnings":warnings});
         fs::write(w.join("report.json"),serde_json::to_vec_pretty(&report).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;Ok(report)
     }).await.map_err(|e|e.to_string())?
@@ -178,6 +191,20 @@ pub async fn carve_firmware(app: tauri::AppHandle, codename: String) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn architecture_scoped_providers() {
+        let mut blob = Blob { path:"vendor/lib/libexample.so".into(),arch:"ARM".into(),machine:40,elf_class:1,soname:Some("libalias.so".into()),needed:vec![],rpath:vec![],undefined:0,bionic:false,category:"Other".into(),missing:vec![] };
+        let provided = provided_libraries(std::slice::from_ref(&blob));
+        assert!(has_provider(&provided, &blob, "libexample.so"));
+        assert!(has_provider(&provided, &blob, "libalias.so"));
+        assert!(!has_provider(&provided, &blob, "absent.so"));
+        assert!(!has_provider(&provided_libraries(&[]), &blob, "libexample.so"));
+        blob.machine = 183;
+        assert!(!has_provider(&provided, &blob, "libexample.so"));
+        blob.machine = 40;
+        blob.elf_class = 2;
+        assert!(!has_provider(&provided, &blob, "libalias.so"));
+    }
     #[test]
     fn categories() {
         assert_eq!(category("vendor/lib/libGLES_adreno.so"), "GPU");
