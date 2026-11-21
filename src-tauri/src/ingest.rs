@@ -2,6 +2,54 @@ use crate::common::{command, log, workspace};
 use std::{fs, path::Path};
 use std::io::{Read, Result as IoResult};
 
+fn import_zip<R: Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    images: &Path,
+    blobs: &Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut imported = 0;
+    let mut payloads = Vec::new();
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+        let safe = entry.enclosed_name().ok_or("Unsafe archive path")?.to_owned();
+        if entry.is_dir() {
+            continue;
+        }
+        let name = safe.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let partition = name.ends_with(".img") || name == "payload.bin" || name == "proprietary-files.txt";
+        let extension = safe.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+        let firmware = ["mbn", "bin", "fw", "mdt", "ucode", "dtb"].contains(&extension.as_str())
+            || (extension.len() == 3 && extension.starts_with('b') && extension[1..].chars().all(|c| c.is_ascii_hexdigit()));
+        let mut header = Vec::new();
+        (&mut entry).take(4).read_to_end(&mut header).map_err(|e| e.to_string())?;
+        if !partition && extension != "so" && !header.starts_with(b"\x7fELF") && !firmware {
+            continue;
+        }
+        let root = if partition { images } else { blobs };
+        fs::create_dir_all(root).map_err(|e| e.to_string())?;
+        let root = root.canonicalize().map_err(|e| e.to_string())?;
+        let dest = root.join(&safe);
+        let mut current = root;
+        for component in safe.components() {
+            current.push(component);
+            if fs::symlink_metadata(&current).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                return Err("Unsafe archive destination: symbolic link".into());
+            }
+        }
+        fs::create_dir_all(dest.parent().ok_or("Invalid archive path")?).map_err(|e| e.to_string())?;
+        let mut output = fs::File::create(&dest).map_err(|e| e.to_string())?;
+        std::io::copy(&mut std::io::Cursor::new(header).chain(&mut entry), &mut output).map_err(|e| e.to_string())?;
+        imported += 1;
+        if name == "payload.bin" {
+            payloads.push(dest);
+        }
+    }
+    if imported == 0 {
+        return Err("No importable files found in ROM ZIP. Expected partition images, payload.bin, proprietary-files.txt, loose .so/ELF libraries or firmware.".into());
+    }
+    Ok(payloads)
+}
+
 fn image_header(reader: impl Read) -> IoResult<Vec<u8>> {
     let mut header = Vec::with_capacity(1082);
     reader.take(1082).read_to_end(&mut header)?;
@@ -36,6 +84,85 @@ fn extract_image(app: &tauri::AppHandle, image: &Path, out: &Path) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Cursor, Write};
+
+    struct ArchiveTest(std::path::PathBuf);
+    impl ArchiveTest {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!("loaphone-ingest-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn import(&self, entries: &[(&str, &[u8])]) -> Result<Vec<std::path::PathBuf>, String> {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (name, data) in entries {
+                writer.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+                writer.write_all(data).unwrap();
+            }
+            let mut zip = zip::ZipArchive::new(writer.finish().unwrap()).unwrap();
+            import_zip(&mut zip, &self.0.join("images"), &self.0.join("blobs"))
+        }
+    }
+    impl Drop for ArchiveTest {
+        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn loose_libraries_and_firmware() {
+        let test = ArchiveTest::new();
+        let entries: &[(&str, &[u8])] = &[
+            ("vendor/lib64/libcamera.so", b"\x7fELFcamera"),
+            ("vendor/lib/libversion.so.1", b"\x7fELFversion"),
+            ("vendor/bin/helper", b"\x7fELFhelper"),
+            ("vendor/firmware/radio.mbn", b"firmware"),
+            ("vendor/firmware/modem.b01", b"segment"),
+            ("README.txt", b"unsupported"),
+        ];
+        assert!(test.import(entries).unwrap().is_empty());
+        for (name, data) in &entries[..5] {
+            assert_eq!(fs::read(test.0.join("blobs").join(name)).unwrap(), *data);
+        }
+        assert!(!test.0.join("blobs/README.txt").exists());
+    }
+
+    #[test]
+    fn empty_and_unsupported_archives_warn() {
+        let test = ArchiveTest::new();
+        fs::create_dir_all(test.0.join("images")).unwrap();
+        fs::write(test.0.join("images/stale.img"), b"old image").unwrap();
+        for entries in [vec![], vec![("README.txt", &b"unsupported"[..])]] {
+            assert!(test.import(&entries).unwrap_err().contains("No importable files found in ROM ZIP"));
+        }
+    }
+
+    #[test]
+    fn unsafe_archive_paths_are_rejected() {
+        let test = ArchiveTest::new();
+        assert!(test.import(&[("../escape.so", b"\x7fELF")]).unwrap_err().contains("Unsafe archive path"));
+        assert!(!test.0.join("escape.so").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_destinations_are_rejected() {
+        let test = ArchiveTest::new();
+        let outside = test.0.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(test.0.join("blobs")).unwrap();
+        std::os::unix::fs::symlink(&outside, test.0.join("blobs/vendor")).unwrap();
+        assert!(test.import(&[("vendor/escape.so", b"\x7fELF")]).unwrap_err().contains("symbolic link"));
+        assert!(!outside.join("escape.so").exists());
+    }
+
+    #[test]
+    fn partition_files_keep_image_destination() {
+        let test = ArchiveTest::new();
+        let payloads = test.import(&[("rom/payload.bin", b"payload"), ("vendor.img", b"image")]).unwrap();
+        assert_eq!(payloads, vec![test.0.join("images/rom/payload.bin").canonicalize().unwrap()]);
+        assert_eq!(fs::read(test.0.join("images/vendor.img")).unwrap(), b"image");
+    }
+
     #[test]
     fn bounded_header() {
         let mut bytes = vec![0; 4096];
@@ -68,44 +195,26 @@ pub async fn ingest_archive(
         if p.extension().and_then(|s| s.to_str()) == Some("zip") {
             let mut zip = zip::ZipArchive::new(fs::File::open(p).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
-            for i in 0..zip.len() {
-                let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
-                let safe = entry
-                    .enclosed_name()
-                    .ok_or("Unsafe archive path")?
-                    .to_owned();
-                let name = safe.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                if entry.is_dir()
-                    || !(name.ends_with(".img")
-                        || name == "payload.bin"
-                        || name == "proprietary-files.txt")
-                {
-                    continue;
-                }
-                let dest = images.join(&safe);
-                fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
-                std::io::copy(
-                    &mut entry,
-                    &mut fs::File::create(&dest).map_err(|e| e.to_string())?,
-                )
-                .map_err(|e| e.to_string())?;
-                if name == "payload.bin" {
-                    log(&app, "ingest", "Extracting payload partitions");
-                    log(
-                        &app,
-                        "ingest",
-                        command(
-                            "payload-dumper-go",
-                            &[
-                                "-p",
-                                "vendor,system,odm,boot",
-                                "-o",
-                                images.to_str().ok_or("Invalid path")?,
-                                dest.to_str().ok_or("Invalid path")?,
-                            ],
-                        )?,
-                    );
-                }
+            let payloads = import_zip(&mut zip, &images, &w.join("blobs")).map_err(|warning| {
+                log(&app, "ingest", &warning);
+                warning
+            })?;
+            for dest in payloads {
+                log(&app, "ingest", "Extracting payload partitions");
+                log(
+                    &app,
+                    "ingest",
+                    command(
+                        "payload-dumper-go",
+                        &[
+                            "-p",
+                            "vendor,system,odm,boot",
+                            "-o",
+                            images.to_str().ok_or("Invalid path")?,
+                            dest.to_str().ok_or("Invalid path")?,
+                        ],
+                    )?,
+                );
             }
             for e in walkdir::WalkDir::new(&images)
                 .into_iter()
