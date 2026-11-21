@@ -1,9 +1,12 @@
 mod backup;
+mod boot_image;
 mod common;
 mod device;
+mod fdt;
 mod flash;
 mod ingest;
 mod rea;
+mod sparse_image;
 mod stock;
 mod support;
 mod tools;
