@@ -72,6 +72,9 @@ pub struct RawScan {
     pub strings: Vec<RawString>,
     pub constants: Vec<RawConstant>,
     pub sections: Vec<Section>,
+    /// The backend skipped functions (limit hit or decompilation failed).
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -664,6 +667,7 @@ fn cap<T>(v: &mut Vec<T>, truncated: &mut bool) {
 }
 
 pub fn classify(path: &str, raw: RawScan) -> Findings {
+    let raw_truncated = raw.truncated;
     let mut f = Findings {
         path: path.into(),
         ..Default::default()
@@ -719,7 +723,7 @@ pub fn classify(path: &str, raw: RawScan) -> Findings {
     cap(&mut f.firmware, &mut t);
     cap(&mut f.nodes, &mut t);
     cap(&mut f.registers, &mut t);
-    f.truncated = t;
+    f.truncated = t || raw_truncated;
     f
 }
 
@@ -916,6 +920,16 @@ mod tests {
         let (i, _) = track_function("f", &ops, &[(0x630, 0x634)], false, &|_| None);
         assert_eq!(i[0].request, Some(0x4901), "cmp/str must not clobber w1");
         assert_eq!(i[1].request, None, "two paths reach the second call");
+    }
+
+    #[test]
+    fn backend_truncation_marks_findings_incomplete() {
+        let raw: RawScan = serde_json::from_str(
+            r#"{"ioctls":[],"strings":[],"constants":[],"sections":[],"truncated":true}"#,
+        )
+        .unwrap();
+        assert!(classify("a.so", raw).truncated);
+        assert!(!classify("b.so", RawScan::default()).truncated);
     }
 
     #[test]

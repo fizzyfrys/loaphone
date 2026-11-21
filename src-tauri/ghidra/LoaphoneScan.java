@@ -72,14 +72,22 @@ public class LoaphoneScan extends GhidraScript {
         di.openProgram(currentProgram);
         Set<String> seen = new HashSet<>();
         int count = 0;
+        boolean truncated = false;
         FunctionIterator fns = currentProgram.getFunctionManager().getFunctions(true);
-        while (fns.hasNext() && !monitor.isCancelled() && count < MAX_FUNCTIONS) {
+        while (fns.hasNext()) {
             Function f = fns.next();
             if (f.isThunk() || f.isExternal()) continue;
+            if (monitor.isCancelled() || count >= MAX_FUNCTIONS) {
+                truncated = true;
+                break;
+            }
             count++;
             DecompileResults r = di.decompileFunction(f, 30, monitor);
             HighFunction h = r.getHighFunction();
-            if (h == null) continue;
+            if (h == null) {
+                truncated = true;
+                continue;
+            }
             Iterator<PcodeOpAST> ops = h.getPcodeOps();
             while (ops.hasNext()) {
                 PcodeOpAST op = ops.next();
@@ -113,7 +121,7 @@ public class LoaphoneScan extends GhidraScript {
 
         try (FileWriter w = new FileWriter(out)) {
             w.write("{\"ioctls\":" + ioctls + "],\"strings\":" + strings + "],\"constants\":"
-                + constants + "],\"sections\":" + sections + "]}");
+                + constants + "],\"sections\":" + sections + "],\"truncated\":" + truncated + "}");
         }
     }
 }
