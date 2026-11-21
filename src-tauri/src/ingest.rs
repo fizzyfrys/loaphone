@@ -9,6 +9,7 @@ fn import_zip<R: Read + std::io::Seek>(
 ) -> Result<Vec<std::path::PathBuf>, String> {
     let mut imported = 0;
     let mut payloads = Vec::new();
+    let mut destinations = std::collections::BTreeSet::new();
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
         let safe = entry.enclosed_name().ok_or("Unsafe archive path")?.to_owned();
@@ -29,7 +30,7 @@ fn import_zip<R: Read + std::io::Seek>(
         let relative = if !partition && firmware && !header.starts_with(b"\x7fELF")
             && !safe.components().any(|part| part.as_os_str() == "firmware")
         {
-            Path::new("firmware").join(&safe)
+            Path::new("loose-firmware").join(&safe)
         } else {
             safe.clone()
         };
@@ -44,6 +45,15 @@ fn import_zip<R: Read + std::io::Seek>(
             }
         }
         fs::create_dir_all(dest.parent().ok_or("Invalid archive path")?).map_err(|e| e.to_string())?;
+        let destination = if dest.exists() {
+            dest.canonicalize().map_err(|e| e.to_string())?
+        } else {
+            dest.parent().ok_or("Invalid archive path")?.canonicalize().map_err(|e| e.to_string())?
+                .join(dest.file_name().ok_or("Invalid archive path")?)
+        };
+        if !destinations.insert(destination) {
+            return Err(format!("Duplicate archive destination: {}", dest.display()));
+        }
         let mut output = fs::File::create(&dest).map_err(|e| e.to_string())?;
         std::io::copy(&mut std::io::Cursor::new(header).chain(&mut entry), &mut output).map_err(|e| e.to_string())?;
         imported += 1;
@@ -147,10 +157,26 @@ mod tests {
     fn root_firmware_is_recognized_by_rea() {
         let test = ArchiveTest::new();
         test.import(&[("modem.bin", b"modem firmware")]).unwrap();
-        let relative = Path::new("firmware/modem.bin");
+        let relative = Path::new("loose-firmware/modem.bin");
         assert_eq!(fs::read(test.0.join("blobs").join(relative)).unwrap(), b"modem firmware");
         assert!(crate::rea::firmware(relative.to_str().unwrap()));
         assert!(!test.0.join("blobs/modem.bin").exists());
+    }
+
+    #[test]
+    fn root_and_nested_firmware_do_not_collide() {
+        let test = ArchiveTest::new();
+        test.import(&[("modem.bin", b"loose modem"), ("firmware/modem.bin", b"nested modem")]).unwrap();
+        assert_eq!(fs::read(test.0.join("blobs/loose-firmware/modem.bin")).unwrap(), b"loose modem");
+        assert_eq!(fs::read(test.0.join("blobs/firmware/modem.bin")).unwrap(), b"nested modem");
+    }
+
+    #[test]
+    fn duplicate_destinations_are_rejected_before_overwrite() {
+        let test = ArchiveTest::new();
+        let error = test.import(&[("modem.bin", b"first"), ("./modem.bin", b"second")]).unwrap_err();
+        assert!(error.contains("Duplicate archive destination"));
+        assert_eq!(fs::read(test.0.join("blobs/loose-firmware/modem.bin")).unwrap(), b"first");
     }
 
     #[test]
