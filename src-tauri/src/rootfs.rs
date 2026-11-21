@@ -591,11 +591,18 @@ fn validate_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn root_key_config(config: &str) -> String {
-    format!("PermitRootLogin prohibit-password\nPubkeyAuthentication yes\n{config}")
+fn root_key_config(config: &str) -> Result<String, String> {
+    for line in config.lines() {
+        let directive = line.trim().split(|c: char| c.is_whitespace() || c == '=')
+            .next().unwrap_or("");
+        if directive.eq_ignore_ascii_case("Match") || directive.eq_ignore_ascii_case("Include") {
+            return Err("SSH public key not installed: existing Match/Include policy is ambiguous; sshd_config and authorized_keys were left unchanged. The key may not work.".into());
+        }
+    }
+    Ok(format!("{config}\nMatch User root\n    PermitRootLogin prohibit-password\n    PubkeyAuthentication yes\n"))
 }
 
-fn profile(image: &Image<'_>, work: &Path, key: Option<&str>) -> Result<Vec<String>, String> {
+fn profile(image: &Image<'_>, work: &Path, key: Option<&str>, warnings: &mut Vec<String>) -> Result<Vec<String>, String> {
     let mut actions = Vec::new();
     let pmos_usb = image
         .read("cat /etc/unudhcpd.conf")
@@ -661,6 +668,14 @@ fn profile(image: &Image<'_>, work: &Path, key: Option<&str>) -> Result<Vec<Stri
     }
     if let Some(key) = key.filter(|k| !k.trim().is_empty()) {
         validate_key(key)?;
+        let config = image.read("cat /etc/ssh/sshd_config")?;
+        let config = match root_key_config(&config) {
+            Ok(config) => config,
+            Err(warning) => {
+                warnings.push(warning);
+                return Ok(actions);
+            }
+        };
         image.dirs("/root/.ssh")?;
         image.metadata("/root/.ssh", 0o40700)?;
         let old = image
@@ -680,8 +695,7 @@ fn profile(image: &Image<'_>, work: &Path, key: Option<&str>) -> Result<Vec<Stri
             ),
             0o600,
         )?;
-        let config = image.read("cat /etc/ssh/sshd_config")?;
-        image.text(work, "/etc/ssh/sshd_config", &root_key_config(&config), 0o600)?;
+        image.text(work, "/etc/ssh/sshd_config", &config, 0o600)?;
         actions.push("Appended public key for root (root-owned 0700 .ssh / 0600 authorized_keys); enabled key-only root SSH. Existing distro user accounts unchanged.".into());
     }
     Ok(actions)
@@ -918,7 +932,7 @@ fn build_at(w: &Path, p: &BuildParams, progress: &dyn Fn(String)) -> Result<Buil
     };
     let profile_actions = if p.headless {
         progress("Applying headless profile".into());
-        profile(&image, &work, p.ssh_key.as_deref())?
+        profile(&image, &work, p.ssh_key.as_deref(), &mut warnings)?
     } else {
         vec![]
     };
@@ -1187,17 +1201,52 @@ mod tests {
     }
 
     #[test]
-    fn root_key_settings_precede_existing_directives() {
+    fn root_key_policy_effective_for_root_only() {
+        if Command::new("sshd").arg("-V").output().is_err() {
+            eprintln!("SKIP effective SSH policy: sshd missing");
+            return;
+        }
+        let dir = TestDir::new();
+        let host_key = dir.0.join("host_key");
+        assert!(Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&host_key).status().unwrap().success());
+        let config_file = dir.0.join("sshd_config");
+        let policy = |user: &str| {
+            let result = Command::new("sshd").args(["-T", "-f"]).arg(&config_file)
+                .arg("-h").arg(&host_key).arg("-C")
+                .arg(format!("user={user},host=x,addr=127.0.0.1"))
+                .output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+            String::from_utf8(result.stdout).unwrap()
+        };
         for config in [
             "",
+            "PubkeyAuthentication no\n",
+            "PermitRootLogin no\nPubkeyAuthentication no\n",
             "#Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin no\n",
-            "PermitRootLogin no\nPubkeyAuthentication no\nInclude /etc/ssh/sshd_config.d/*.conf\n",
-            "Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin no\n",
-            "Match User root\n PermitRootLogin no\n",
         ] {
-            let updated = root_key_config(config);
-            assert!(updated.starts_with("PermitRootLogin prohibit-password\nPubkeyAuthentication yes\n"));
-            assert!(updated.ends_with(config));
+            fs::write(&config_file, config).unwrap();
+            let alice = policy("alice");
+            fs::write(&config_file, root_key_config(config).unwrap()).unwrap();
+            let root = policy("root");
+            assert!(root.lines().any(|line| line == "permitrootlogin without-password" || line == "permitrootlogin prohibit-password"), "{root}");
+            assert!(root.lines().any(|line| line == "pubkeyauthentication yes"));
+            assert_eq!(policy("alice"), alice);
+        }
+        let included = dir.0.join("included.conf");
+        fs::write(&included, "Match User root\n PermitRootLogin no\n").unwrap();
+        for config in [
+            format!("PermitRootLogin no\nPubkeyAuthentication no\nInclude {}\n", included.display()),
+            "PubkeyAuthentication no\nMatch User root\n PermitRootLogin no\n".into(),
+        ] {
+            fs::write(&config_file, &config).unwrap();
+            let root = policy("root");
+            let alice = policy("alice");
+            assert!(root_key_config(&config).unwrap_err().contains("key may not work"));
+            assert_eq!(fs::read_to_string(&config_file).unwrap(), config);
+            assert_eq!(policy("root"), root);
+            assert_eq!(policy("alice"), alice);
+            assert!(root.lines().any(|line| line == "permitrootlogin no"));
         }
     }
 
@@ -1355,6 +1404,22 @@ mod tests {
                         .unwrap()
                         .contains("0755")
                 );
+            }
+            if !openrc {
+                let source_image = Image { path: &source };
+                source_image.text(&dir.0, "/root/.ssh/authorized_keys", "existing-key\n", 0o600).unwrap();
+                for config in [
+                    "PubkeyAuthentication no\nMatch User root\n PermitRootLogin no\n",
+                    "PermitRootLogin no\nInclude /etc/ssh/sshd_config.d/*.conf\n",
+                ] {
+                    source_image.text(&dir.0, "/etc/ssh/sshd_config", config, 0o600).unwrap();
+                    let unchanged = build_at(&w, &params(&source), &|_| {}).unwrap();
+                    assert!(unchanged.warnings.iter().any(|warning| warning.contains("key may not work")));
+                    assert!(!unchanged.profile_actions.iter().any(|action| action.contains("Appended public key")));
+                    let image = Image { path: Path::new(&unchanged.output_path) };
+                    assert_eq!(image.read("cat /etc/ssh/sshd_config").unwrap(), config);
+                    assert_eq!(image.read("cat /root/.ssh/authorized_keys").unwrap(), "existing-key\n");
+                }
             }
             let mut no_profile = params(&source);
             no_profile.headless = false;

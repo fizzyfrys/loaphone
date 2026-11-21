@@ -126,8 +126,12 @@ profile refuses images without an installed SSH service rather than pretending
 SSH was enabled. Use a suitably provisioned source or build without that profile.
 
 An optional OpenSSH public key is appended to `/root/.ssh/authorized_keys`
-(0700 directory, 0600 file); the builder explicitly enables **key-only root
-login**, leaving normal distro accounts unchanged. This intentionally uses root
+(0700 directory, 0600 file); the builder adds a root-only SSH Match block for
+**key-only root login**, leaving other users' effective settings unchanged.
+Existing active Match or Include directives make policy precedence ambiguous:
+the builder then leaves both sshd_config and authorized_keys untouched and
+reports a warning that the key may not work. Commented directives are ignored.
+This intentionally uses root
 instead of guessing image-specific default usernames. Omit the key to preserve
 distro authentication policy. Review this security choice and generated files
 before deployment. No keys or Wi-Fi credentials are sent to upstream servers.
