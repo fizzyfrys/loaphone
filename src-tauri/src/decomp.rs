@@ -894,7 +894,7 @@ mod tests {
         fs::remove_dir(b).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn timeout_kills_the_whole_process_group() {
         let pidfile = private_temp_dir().unwrap().join("pid");
@@ -904,13 +904,18 @@ mod tests {
         let err = run_with_timeout(cmd, Duration::from_millis(300)).unwrap_err();
         assert!(err.starts_with("timed out"), "{err}");
         let pid = fs::read_to_string(&pidfile).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-        let alive = Command::new("kill")
-            .args(["-0", pid.trim()])
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success();
+        // Gone, or a zombie waiting for a reaper, both count as terminated.
+        let alive = || {
+            fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+                .ok()
+                .and_then(|st| st.rsplit(')').next().map(|r| r.trim_start().to_string()))
+                .is_some_and(|r| !r.starts_with('Z'))
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let alive = alive();
         fs::remove_dir_all(pidfile.parent().unwrap()).unwrap();
         assert!(!alive, "background sleep {pid} survived the timeout");
     }
