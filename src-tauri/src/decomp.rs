@@ -492,14 +492,34 @@ pub fn parse_rizin(out: &str, data: &[u8]) -> Result<RawScan, String> {
 
 // --------------------------------------------------------------- Ghidra ----
 
-pub fn ghidra_scan(program: &Path, file: &Path) -> Result<RawScan, String> {
+/// Creates a fresh directory only this user can access. `create_dir` fails on
+/// an existing path, so a pre-created (possibly hostile) directory is never reused.
+fn private_temp_dir() -> Result<PathBuf, String> {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "loaphone-ghidra-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    for _ in 0..16 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "loaphone-ghidra-{}-{}-{nanos:08x}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("could not create a private temporary directory".into())
+}
+
+pub fn ghidra_scan(program: &Path, file: &Path) -> Result<RawScan, String> {
+    let dir = private_temp_dir()?;
     let result = (|| {
         fs::write(dir.join("LoaphoneScan.java"), GHIDRA_SCRIPT).map_err(|e| e.to_string())?;
         let out = dir.join("scan.json");
@@ -819,6 +839,20 @@ mod tests {
             panic!("LOAPHONE_REQUIRE_RIZIN is set but rizin is not on PATH");
         }
         b
+    }
+
+    #[test]
+    fn private_temp_dir_is_fresh_and_owner_only() {
+        let a = private_temp_dir().unwrap();
+        let b = private_temp_dir().unwrap();
+        assert_ne!(a, b);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        fs::remove_dir(a).unwrap();
+        fs::remove_dir(b).unwrap();
     }
 
     #[test]
