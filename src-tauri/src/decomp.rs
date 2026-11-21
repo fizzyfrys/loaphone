@@ -202,7 +202,22 @@ pub fn status_of(backend: Option<Backend>) -> Status {
     }
 }
 
+fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .status();
+    #[cfg(windows)]
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .status();
+}
+
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<String, String> {
+    // Own process group so a timeout also kills children (Ghidra's JVM is
+    // started by a launcher script).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -237,6 +252,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<String, Strin
             return Err(format!("exited with {status}: {detail}"));
         }
         if start.elapsed() > timeout {
+            kill_tree(child.id());
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!("timed out after {}s", timeout.as_secs()));
@@ -853,6 +869,17 @@ mod tests {
         }
         fs::remove_dir(a).unwrap();
         fs::remove_dir(b).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_the_whole_process_group() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & echo $!; wait"]);
+        let start = Instant::now();
+        let err = run_with_timeout(cmd, Duration::from_millis(300)).unwrap_err();
+        assert!(err.starts_with("timed out"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(10), "grandchild kept stdout open");
     }
 
     #[test]
