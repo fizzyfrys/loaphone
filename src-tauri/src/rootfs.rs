@@ -736,6 +736,19 @@ fn overlay(image: &Image<'_>, source: &Path) -> Result<usize, String> {
     Ok(count)
 }
 
+fn local_source(path: &Path, root: &Path) -> Result<std::path::PathBuf, String> {
+    let path = fs::canonicalize(path).map_err(err)?;
+    for name in ["rootfs.img", "rootfs.sparse.img"] {
+        if fs::canonicalize(root.join(name)).is_ok_and(|output| output == path) {
+            return Err("Local source is a current builder output; copy it outside rootfs first".into());
+        }
+    }
+    if fs::canonicalize(root.join("building")).is_ok_and(|work| path.starts_with(work)) {
+        return Err("Local source cannot be inside rootfs/building".into());
+    }
+    Ok(path)
+}
+
 fn build_at(w: &Path, p: &BuildParams, progress: &dyn Fn(String)) -> Result<BuildReport, String> {
     let _guard = BUILD_LOCK
         .try_lock()
@@ -750,6 +763,11 @@ fn build_at(w: &Path, p: &BuildParams, progress: &dyn Fn(String)) -> Result<Buil
         }
     }
     let root = w.join("rootfs");
+    let local = if p.source == "local" {
+        Some(local_source(Path::new(p.local_path.as_deref().ok_or("Select a local image")?), &root)?)
+    } else {
+        None
+    };
     let cache = root.join("cache");
     fs::create_dir_all(&cache).map_err(err)?;
     let work = root.join("building");
@@ -758,9 +776,7 @@ fn build_at(w: &Path, p: &BuildParams, progress: &dyn Fn(String)) -> Result<Buil
     }
     fs::create_dir(&work).map_err(err)?;
     let mut warnings = Vec::new();
-    let (source, description, expected) = if p.source == "local" {
-        let path = fs::canonicalize(p.local_path.as_deref().ok_or("Select a local image")?)
-            .map_err(err)?;
+    let (source, description, expected) = if let Some(path) = local {
         (path.clone(), path.display().to_string(), None)
     } else {
         let c = client()?;
@@ -1131,6 +1147,25 @@ mod tests {
         fs::write(&staged, "replacement").unwrap();
         publish_raw(&staged, &output).unwrap();
         assert_eq!(fs::read(&output).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn local_sources_cannot_alias_outputs() {
+        let dir = TestDir::new();
+        let output = dir.0.join("rootfs.img");
+        fs::write(&output, "original").unwrap();
+        assert!(local_source(&output, &dir.0).unwrap_err().contains("current builder output"));
+        #[cfg(unix)]
+        {
+            let alias = dir.0.join("alias.img");
+            std::os::unix::fs::symlink(&output, &alias).unwrap();
+            assert!(local_source(&alias, &dir.0).is_err());
+        }
+        let source = dir.0.join("source.img");
+        fs::write(&source, []).unwrap();
+        assert_eq!(local_source(&source, &dir.0).unwrap(), source);
+        assert!(local_source(&dir.0.join("missing"), &dir.0).is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"original");
     }
 
     fn tools_available() -> bool {
