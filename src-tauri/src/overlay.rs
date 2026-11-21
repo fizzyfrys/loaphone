@@ -170,6 +170,22 @@ pub fn build_overlay_at(w: &Path) -> Result<OverlayReport, String> {
     if dump.is_file() {
         files.push(dump);
     }
+    let vendor_ueventd = w.join("dump/ueventd.rc");
+    if vendor_ueventd.is_file() {
+        files.push(vendor_ueventd);
+    }
+    let vendor_init = w.join("dump/init");
+    if vendor_init.is_dir() {
+        let mut init_files = Vec::new();
+        for entry in walkdir::WalkDir::new(vendor_init) {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.file_type().is_file() && entry.path().extension().is_some_and(|s| s == "rc") {
+                init_files.push(entry.into_path());
+            }
+        }
+        init_files.sort();
+        files.extend(init_files);
+    }
     let blobs = w.join("blobs");
     if blobs.exists() {
         let mut rc_files = Vec::new();
@@ -229,7 +245,8 @@ pub fn build_overlay_at(w: &Path) -> Result<OverlayReport, String> {
     fs::create_dir_all(&rules_dir).map_err(|e| e.to_string())?;
     fs::write(rules_dir.join("99-loaphone-android.rules"), &rules_text)
         .map_err(|e| e.to_string())?;
-    let (firmware_count, firmware_skipped) = copy_overlay_firmware(&blobs, &overlay.join("lib/firmware"))?;
+    let (firmware_count, firmware_skipped) =
+        copy_overlay_firmware(&blobs, &overlay.join("lib/firmware"))?;
     skipped.extend(firmware_skipped);
     let zip_path = w.join("overlay.zip");
     let mut zip = zip::ZipWriter::new(fs::File::create(&zip_path).map_err(|e| e.to_string())?);
@@ -342,6 +359,49 @@ mod tests {
     }
 
     #[test]
+    fn vendor_dump_sources_and_precedence() {
+        let w = std::env::temp_dir().join(format!("loaphone-vendor-dump-{}", std::process::id()));
+        fs::create_dir_all(w.join("dump/init/nested")).unwrap();
+        fs::write(w.join("dump/ueventd.rc"), "/dev/gpu 0600 system system").unwrap();
+        let vendor_only = build_overlay_at(&w).unwrap();
+        assert_eq!(vendor_only.sources, ["dump/ueventd.rc"]);
+        assert_eq!(vendor_only.rules[0].mode.as_deref(), Some("0600"));
+        fs::write(w.join("dump/init/a.rc"), "chmod 0640 /dev/gpu").unwrap();
+        fs::write(w.join("dump/init/nested/z.rc"), "chmod 0660 /dev/gpu").unwrap();
+        fs::write(w.join("dump/init/ignored.txt"), "chmod 0777 /dev/gpu").unwrap();
+        fs::write(w.join("dump/init-root.txt"), "/dev/gpu 0666 root root").unwrap();
+        let dump = build_overlay_at(&w).unwrap();
+        assert_eq!(
+            dump.sources,
+            [
+                "dump/init-root.txt",
+                "dump/ueventd.rc",
+                "dump/init/a.rc",
+                "dump/init/nested/z.rc"
+            ]
+        );
+        assert_eq!(dump.rules[0].mode.as_deref(), Some("0660"));
+        assert_eq!(dump.rules[0].android_owner.as_deref(), Some("system"));
+        fs::create_dir_all(w.join("blobs/vendor/etc/init")).unwrap();
+        fs::write(
+            w.join("blobs/vendor/etc/init/device.rc"),
+            "chown root graphics /dev/gpu",
+        )
+        .unwrap();
+        let blobs = build_overlay_at(&w).unwrap();
+        assert_eq!(blobs.rules[0].group.as_deref(), Some("video"));
+        assert_eq!(blobs.rules[0].mode.as_deref(), Some("0660"));
+        assert_eq!(blobs.rules[0].sources.len(), 5);
+        fs::remove_file(w.join("dump/init-root.txt")).unwrap();
+        fs::remove_file(w.join("dump/ueventd.rc")).unwrap();
+        fs::remove_dir_all(w.join("blobs")).unwrap();
+        let init_only = build_overlay_at(&w).unwrap();
+        assert_eq!(init_only.rules[0].mode.as_deref(), Some("0660"));
+        assert_eq!(init_only.sources.len(), 2);
+        fs::remove_dir_all(w).unwrap();
+    }
+
+    #[test]
     fn firmware_layout_and_collisions() {
         let w = std::env::temp_dir().join(format!("loaphone-firmware-{}", std::process::id()));
         let blobs = w.join("blobs");
@@ -366,7 +426,10 @@ mod tests {
         for name in ["qcom/a660_zap.b00", "qcom/radio.mbn", "nested.bin"] {
             assert!(dest.join(name).is_file());
         }
-        assert_eq!(crate::rea::copy_firmware(&blobs, &w.join("carved")).unwrap(), 5);
+        assert_eq!(
+            crate::rea::copy_firmware(&blobs, &w.join("carved")).unwrap(),
+            5
+        );
         assert!(w.join("carved/vendor/firmware/modem.mdt").is_file());
         assert!(w.join("carved/firmware_mnt/image/qcom/radio.mbn").is_file());
         fs::remove_dir_all(w).unwrap();
@@ -410,9 +473,7 @@ mod tests {
         assert_eq!(zip.len(), 2);
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(
-            &mut zip
-                .by_name("lib/firmware/modem.mdt")
-                .unwrap(),
+            &mut zip.by_name("lib/firmware/modem.mdt").unwrap(),
             &mut bytes,
         )
         .unwrap();
@@ -422,10 +483,7 @@ mod tests {
         let rebuilt = build_overlay_at(&w).unwrap();
         assert_eq!(rebuilt.firmware_count, 0);
         assert!(!w.join("overlay/stale").exists());
-        assert!(
-            !w.join("overlay/lib/firmware/modem.mdt")
-                .exists()
-        );
+        assert!(!w.join("overlay/lib/firmware/modem.mdt").exists());
         fs::write(w.join("blobs/vendor/etc/init/device.rc"), [0xff]).unwrap();
         assert!(build_overlay_at(&w).is_err());
         fs::remove_dir_all(w).unwrap();
