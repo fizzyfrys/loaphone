@@ -26,11 +26,18 @@ fn import_zip<R: Read + std::io::Seek>(
             continue;
         }
         let root = if partition { images } else { blobs };
+        let relative = if !partition && firmware && !header.starts_with(b"\x7fELF")
+            && !safe.components().any(|part| part.as_os_str() == "firmware")
+        {
+            Path::new("firmware").join(&safe)
+        } else {
+            safe.clone()
+        };
         fs::create_dir_all(root).map_err(|e| e.to_string())?;
         let root = root.canonicalize().map_err(|e| e.to_string())?;
-        let dest = root.join(&safe);
+        let dest = root.join(&relative);
         let mut current = root;
-        for component in safe.components() {
+        for component in relative.components() {
             current.push(component);
             if fs::symlink_metadata(&current).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
                 return Err("Unsafe archive destination: symbolic link".into());
@@ -134,6 +141,16 @@ mod tests {
         for entries in [vec![], vec![("README.txt", &b"unsupported"[..])]] {
             assert!(test.import(&entries).unwrap_err().contains("No importable files found in ROM ZIP"));
         }
+    }
+
+    #[test]
+    fn root_firmware_is_recognized_by_rea() {
+        let test = ArchiveTest::new();
+        test.import(&[("modem.bin", b"modem firmware")]).unwrap();
+        let relative = Path::new("firmware/modem.bin");
+        assert_eq!(fs::read(test.0.join("blobs").join(relative)).unwrap(), b"modem firmware");
+        assert!(crate::rea::firmware(relative.to_str().unwrap()));
+        assert!(!test.0.join("blobs/modem.bin").exists());
     }
 
     #[test]
