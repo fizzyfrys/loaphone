@@ -97,9 +97,20 @@ fn filesystem(data: &[u8]) -> Option<Filesystem> {
     }
 }
 
+fn clear_unpacked_output(out: &Path) -> IoResult<()> {
+    match fs::symlink_metadata(out) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(out),
+        Ok(_) => Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "Unpacked image destination is not a directory")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 fn unpack_image(image: &Path, work: &Path, relative: &Path, data: &[u8]) -> IoResult<(Option<PathBuf>, Vec<String>)> {
+    let out = work.join("unpacked").join(relative);
     let sparse = data.starts_with(&sparse_image::MAGIC);
     if !sparse && !boot_image::recognizes(data) {
+        clear_unpacked_output(&out)?;
         return Ok((Some(image.to_owned()), vec![]));
     }
 
@@ -121,14 +132,8 @@ fn unpack_image(image: &Path, work: &Path, relative: &Path, data: &[u8]) -> IoRe
         messages.push(format!("Unpacked {}: {summary}", relative.display()));
     }
 
-    let out = work.join("unpacked").join(relative);
     fs::create_dir_all(out.parent().ok_or(std::io::ErrorKind::InvalidInput)?)?;
-    match fs::symlink_metadata(&out) {
-        Ok(meta) if meta.is_dir() => fs::remove_dir_all(&out)?,
-        Ok(_) => return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "Unpacked image destination is not a directory")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
+    clear_unpacked_output(&out)?;
     fs::rename(stage.path(), &out)?;
     Ok(((!is_boot).then(|| out.join("image.raw")), messages))
 }
@@ -278,6 +283,30 @@ mod tests {
                 assert!(messages[0].contains("kernel config recovered"));
             }
         }
+    }
+
+    #[test]
+    fn review_regression_replacing_sparse_image_removes_only_its_expansion() {
+        let test = ArchiveTest::new();
+        let path = Path::new("vendor.img");
+        let image = test.0.join(path);
+        let mut raw = vec![0; 4096];
+        raw[1080..1082].copy_from_slice(&[0x53, 0xef]);
+        let (sparse, _) = sparse_image::tests::sample(&raw);
+        fs::write(&image, &sparse).unwrap();
+        let (expanded, _) = unpack_image(&image, &test.0, path, &sparse).unwrap();
+        let expanded = expanded.unwrap();
+        assert!(expanded.is_file());
+
+        let other = test.0.join("unpacked/odm.img");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("image.raw"), b"other image").unwrap();
+        fs::write(&image, &raw).unwrap();
+        let (input, messages) = unpack_image(&image, &test.0, path, &raw).unwrap();
+        assert_eq!(input, Some(image));
+        assert!(messages.is_empty());
+        assert!(!expanded.parent().unwrap().exists());
+        assert!(other.join("image.raw").is_file());
     }
 
     #[test]
