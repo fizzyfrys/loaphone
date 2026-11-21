@@ -1,0 +1,10 @@
+[
+  {"codename":"sargo","name":"Google Pixel 3a","tier":1,"mainline":false,"lineage":"https://wiki.lineageos.org/devices/sargo/","postmarketos":"https://wiki.postmarketos.org/wiki/Google_Pixel_3a_(google-sargo)"},
+  {"codename":"blueline","name":"Google Pixel 3","tier":1,"mainline":false,"lineage":"https://wiki.lineageos.org/devices/blueline/","postmarketos":"https://wiki.postmarketos.org/wiki/Google_Pixel_3_(google-blueline)"},
+  {"codename":"sunfish","name":"Google Pixel 4a","tier":1,"mainline":false,"lineage":"https://wiki.lineageos.org/devices/sunfish/","postmarketos":"https://wiki.postmarketos.org/wiki/Google_Pixel_4a_(google-sunfish)"},
+  {"codename":"redfin","name":"Google Pixel 5","tier":1,"mainline":false,"lineage":"https://wiki.lineageos.org/devices/redfin/","postmarketos":"https://wiki.postmarketos.org/wiki/Google_Pixel_5_(google-redfin)"},
+  {"codename":"enchilada","name":"OnePlus 6","tier":1,"mainline":true,"lineage":"https://wiki.lineageos.org/devices/enchilada/","postmarketos":"https://wiki.postmarketos.org/wiki/OnePlus_6_(oneplus-enchilada)"},
+  {"codename":"fajita","name":"OnePlus 6T","tier":1,"mainline":true,"lineage":"https://wiki.lineageos.org/devices/fajita/","postmarketos":"https://wiki.postmarketos.org/wiki/OnePlus_6T_(oneplus-fajita)"},
+  {"codename":"guacamole","name":"OnePlus 7 Pro","tier":1,"mainline":false,"lineage":"https://wiki.lineageos.org/devices/guacamole/","postmarketos":"https://wiki.postmarketos.org/wiki/OnePlus_7_Pro_(oneplus-guacamole)"},
+  {"codename":"kebab","name":"OnePlus 8T","tier":1,"mainline":false,"lineage":"https://wiki.lineageos.org/devices/kebab/","postmarketos":"https://wiki.postmarketos.org/wiki/OnePlus_8T_(oneplus-kebab)"}
+]
