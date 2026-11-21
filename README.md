@@ -2,7 +2,7 @@
 
 Native Linux on your old Android phone. Loaphone is a local-first Tauri v2 desktop workbench for profiling phones, collecting hardware evidence, extracting proprietary blobs, inspecting dependencies, preserving user data and planning a Linux installation. Reuse a phone as a Linux handheld or a headless server.
 
-**Early experimental software, not a universal phone installer.** No phone is needed to explore the app or inspect a ROM. The app does not supply firmware, rootfs images, exploits, unlock codes or proprietary restoration tools.
+**Early experimental software, not a universal phone installer.** No phone is needed to explore the app or inspect a ROM. Rootfs builder can fetch public upstream images; the app does not supply firmware, exploits, unlock codes or proprietary restoration tools.
 
 ## Run
 
@@ -43,6 +43,11 @@ Workspaces live under the OS app data directory for `com.fizzyfrys.loaphone`, wi
   lib/firmware/          exported standalone firmware
   report.json
   stock/                 unpacked Pixel factory images
+  overlay/               exported udev rules and firmware
+  rootfs/cache/          downloaded upstream archives
+  rootfs/rootfs.img      prepared raw ext4 filesystem
+  rootfs/rootfs.sparse.img  optional img2simg output
+  rootfs/report.json     source/output hashes, sizes and actions
 ```
 
 ## Host tools
@@ -56,6 +61,7 @@ All optional tools are detected and missing tools are reported without crashing:
 | Further manual unpacking | dump.erofs, unpack_bootimg / unpackbootimg, dtc |
 | Patching and inspection | patchelf, binwalk, Ghidra analyzeHeadless, rizin / r2 |
 | Open recovery | fastboot, [bkerler edl](https://github.com/bkerler/edl), [Heimdall](https://github.com/Benjamin-Dobell/Heimdall), lsusb on Linux |
+| Rootfs builder | e2fsck, resize2fs, debugfs (e2fsprogs), xz; optional img2simg (android-sdk-libsparse-utils) |
 
 Put tools on PATH. No tool other than patchelf is required for a plain ELF report. A library classified as Android-provided may still be absent or incompatible on your target rootfs. Tier 1 means a prioritized research target, not a guarantee of a working Linux port. Wiki links and mainline classifications should be checked against current upstream documentation.
 
@@ -65,9 +71,9 @@ Put tools on PATH. No tool other than patchelf is required for a plain ELF repor
 - Back up personal data and critical partitions first, and verify the copies. Root is optional for ordinary pulls but needed for boot / critical partitions and some hardware evidence. Backups are best effort and never complete Android backups. Content-provider exports preserve raw rows as JSON because Android output is not an unambiguous CSV format. Permission-denied items are reported. APKs do not include private app data or keys.
 - Factory restoration and userdata flashing can erase everything. Do not relock a bootloader with custom images. This application never unlocks, exploits, relocks or automatically reboots after a Linux flash.
 - Pixel recovery unpacks a user-supplied factory ZIP and plans bootloader / radio flashes followed by fastboot -w update. Check downloaded firmware authenticity and hashes yourself. OnePlus EDL requires compatible rawprogram0.xml / patch0.xml and potentially a device-specific signed programmer; vendor-authorized devices may be unsupported. Samsung currently supports a stock BOOT partition image through Heimdall only, not a complete firmware restoration. Vendor proprietary tools are not supported.
-- Generic partition plans are not device-specific port recipes. Supply boot, rootfs, optional DTBO and vendor_boot images made for the exact device and selected slot. postmarketOS, Droidian and Ubuntu Touch are labels for these supplied images, not rootfs downloaders or builders.
-- Server profile describes SSH enabled, no UI and USB networking; the rootfs must already implement those settings. Optional Wi-Fi credentials remain in frontend memory and are not written into images. SSH verification only tests TCP 172.16.42.1:22, not authentication or OS identity.
-- Boot images and Android sparse images are retained for manual unpacking. Compressed filesystems other than ZIP deflate, embedded binwalk carving, live device reboot sequencing and cancellation / process timeouts are not implemented. Use trusted ROM archives with sufficient free disk space. Do not import untrusted files as an elevated user.
+- Generic partition plans are not device-specific port recipes. Supply boot, rootfs, optional DTBO and vendor_boot images made for the exact device and selected slot. Flasher writes its rootfs input directly to userdata. In particular, upstream Droidian installs `data/rootfs.img` **inside** `/data`; the builder's extracted inner ext4 is not a ready-to-flash Droidian userdata container. Use the port's installation instructions, not a blind userdata flash.
+- Rootfs builder's headless profile enables existing SSH services; it does not install packages. Systemd selects multi-user target and adds a configfs NCM/RNDIS service at 172.16.42.1/24; configure the host statically as 172.16.42.2/24. Existing gadget managers can conflict and may need disabling on target. OpenRC preserves and verifies pmOS USB configuration. Graphical packages are not removed. Optional Wi-Fi credentials remain in frontend memory and are not written into images. SSH verification only tests TCP 172.16.42.1:22, not authentication or OS identity.
+- Boot images and Android sparse images are retained for manual unpacking. Rootfs builder alone accepts XZ disk images and ZIP ext4 images; it does not unpack boot/DTBO/sparse inputs. Embedded binwalk carving, live device reboot sequencing and cancellation are not implemented. Use trusted archives with sufficient free disk space. Do not import untrusted files as an elevated user.
 - Hardware dump supplies research context, not automatic driver reverse engineering. REA analyzes the imported blobs directory, not kernel text logs or DTS semantics. Review exports for personal identifiers before sharing. Firmware may have redistribution restrictions.
 - Real-device flashing, root backups and recovery operations have not been hardware-validated in this first version. Read the port's upstream installation and recovery instructions before proceeding.
 
@@ -76,7 +82,60 @@ Put tools on PATH. No tool other than patchelf is required for a plain ELF repor
 - Ghidra / rizin headless HAL analysis and reproducible REA jobs
 - DTS to mainline conversion and device-tree comparison
 - udev rule generation from ueventd.rc
-- Rootfs building, server / Wi-Fi provisioning and device-specific installation recipes
+- Wi-Fi provisioning and device-specific installation recipes
 - Android sparse and boot image unpacking, archive quotas, process cancellation / timeouts
 - Complete Samsung firmware mapping and stronger recovery image validation
 - Hardware-backed integration tests for each supported device and OS
+
+## Rootfs builder
+
+Use the **Rootfs builder** screen after exporting an overlay in REA Inspector.
+On Ubuntu install `e2fsprogs xz-utils android-sdk-libsparse-utils`. No root,
+mounts, chroot or qemu are used. The builder streams downloads into the device
+workspace cache, checks published SHA-256 when available, extracts raw ext4
+(or the root ext4 partition of a 512-byte-sector MBR/GPT disk), runs e2fsck and
+resize2fs, then uses debugfs to apply overlay files and profile settings to a
+copy. Default added capacity is 512 MiB. Added files are explicitly root-owned;
+existing files not replaced by the overlay/profile keep their ownership.
+Outputs from failed builds do not replace the previous successful raw image.
+Allow several times the compressed size in free disk space; there is no quota
+or build cancellation. LUKS, LVM, extended MBR and ambiguous multi-root images
+require manual extraction. Android sparse *output* is optional; input is raw.
+Current pmOS images can require e2fsprogs 1.47 or newer (Ubuntu 22.04's 1.46.5
+rejects the orphan-file feature). Put a recent e2fsprogs installation on PATH;
+the builder fails with the tool's diagnostic rather than stripping filesystem features.
+
+The pmOS resolver follows `https://images.postmarketos.org/` to its current
+directory and reads `index.json` (currently `https://images.nura.eco/bpo/index.json`).
+Only published device mappings are included: google-sargo, oneplus-enchilada,
+oneplus-fajita. Console/headless is preferred, otherwise the UI fallback is
+reported. The latest image within that preference is selected across releases.
+The index hash and published `.sha256` sidecar are checked for agreement.
+Newer pmOS images may use systemd rather than OpenRC; init is detected from
+the image, not inferred from its distro name. When pmOS's existing initramfs
+USB address is verified in `/etc/unudhcpd.conf`, it is preserved on either init
+system, including its upstream DHCP server, rather than adding a competing gadget.
+Droidian resolves the latest GitHub release's generic `phone-rootfs-apiXX-arm64`
+ZIP, extracts `data/rootfs.img`, and checks `SHA256SUMS` when published.
+Choose the API level matching your Halium boot image. GitHub API rate limits
+are reported; downloading the ZIP manually and choosing Local file works offline.
+The current Droidian generic image may not include openssh-server; the headless
+profile refuses images without an installed SSH service rather than pretending
+SSH was enabled. Use a suitably provisioned source or build without that profile.
+
+An optional OpenSSH public key is appended to `/root/.ssh/authorized_keys`
+(0700 directory, 0600 file); the builder explicitly enables **key-only root
+login**, leaving normal distro accounts unchanged. This intentionally uses root
+instead of guessing image-specific default usernames. Omit the key to preserve
+distro authentication policy. Review this security choice and generated files
+before deployment. No keys or Wi-Fi credentials are sent to upstream servers.
+
+Offline tests include a tiny `mkfs.ext4 -d` image, both init profiles and debugfs
+verification. To reproduce a public-image smoke build through the same pipeline:
+
+```sh
+cd src-tauri
+LOAPHONE_ROOTFS_SOURCE=/path/to/public.img.xz \
+LOAPHONE_ROOTFS_WORKSPACE=/path/to/workspace \
+cargo test public_image_build -- --ignored --nocapture
+```

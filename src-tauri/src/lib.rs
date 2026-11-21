@@ -5,6 +5,7 @@ mod flash;
 mod ingest;
 mod overlay;
 mod rea;
+mod rootfs;
 mod stock;
 mod support;
 mod tools;
@@ -24,6 +25,7 @@ pub fn run() {
             rea::patch_blob,
             rea::carve_firmware,
             overlay::build_overlay,
+            rootfs::build_rootfs,
             flash::recommend_track,
             flash::flash_plan,
             flash::preflight,
