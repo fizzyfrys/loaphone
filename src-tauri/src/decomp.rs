@@ -322,10 +322,22 @@ pub fn track_function(
     let mut regs: BTreeMap<u8, u64> = BTreeMap::new();
     let (mut ioctls, mut constants) = (vec![], vec![]);
     let mask = if arm32 { 0xffff_ffff } else { u64::MAX };
+    // Without a CFG, values are only trusted along straight-line code: state
+    // is dropped at every branch target and after unconditional jumps.
+    let join_points: BTreeSet<u64> = ops
+        .iter()
+        .filter(|op| ["jmp", "cjmp"].contains(&op["type"].as_str().unwrap_or("")))
+        .filter_map(|op| op["jump"].as_u64())
+        .collect();
+    let mut after_jump = false;
     for op in ops {
         let addr = op["offset"].as_u64().unwrap_or(0);
         let kind = op["type"].as_str().unwrap_or("");
         let text = op["opcode"].as_str().unwrap_or("").to_lowercase();
+        if after_jump || join_points.contains(&addr) {
+            regs.clear();
+        }
+        after_jump = ["jmp", "ujmp", "ret"].contains(&kind);
         if let Some(target) = op["jump"].as_u64()
             && ["call", "ucall", "jmp", "ucjmp"].contains(&kind)
             && ioctl_targets
@@ -343,6 +355,13 @@ pub fn track_function(
             continue;
         }
         let (mnem, rest) = text.split_once(' ').unwrap_or((text.as_str(), ""));
+        let base = mnem.trim_end_matches(".w");
+        let reads_only = ["cmp", "cmn", "tst", "teq", "cbz", "cbnz", "tbz", "tbnz", "push"]
+            .contains(&base)
+            || (base.starts_with("st") && !base.starts_with("stx") && !base.starts_with("stlx"));
+        if reads_only {
+            continue;
+        }
         let args: Vec<&str> = rest.split(", ").collect();
         let Some(rd) = args.first().and_then(|a| reg_index(a)) else {
             continue;
@@ -350,7 +369,6 @@ pub fn track_function(
         let wide = !arm32 && args[0].trim().starts_with('x');
         let m = if wide || arm32 { mask } else { 0xffff_ffff };
         let src = args.get(1).copied().unwrap_or("");
-        let base = mnem.trim_end_matches(".w");
         let value = match base {
             "mov" | "movs" | "movz" | "movw" | "mvn" if imm(src).is_some() => {
                 let v = imm(src).unwrap() << shift(args.get(2));
@@ -880,6 +898,24 @@ mod tests {
         let err = run_with_timeout(cmd, Duration::from_millis(300)).unwrap_err();
         assert!(err.starts_with("timed out"), "{err}");
         assert!(start.elapsed() < Duration::from_secs(10), "grandchild kept stdout open");
+    }
+
+    #[test]
+    fn tracker_keeps_values_across_reads_and_drops_them_at_joins() {
+        let ops: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {"offset":0,"type":"mov","opcode":"mov w1, 0x4901"},
+            {"offset":4,"type":"cmp","opcode":"cmp w1, 3"},
+            {"offset":8,"type":"store","opcode":"str w1, [sp, 8]"},
+            {"offset":12,"type":"call","opcode":"bl 0x630","jump":1584},
+            {"offset":16,"type":"cjmp","opcode":"b.ne 0x24","jump":36},
+            {"offset":20,"type":"mov","opcode":"mov w1, 0x4902"},
+            {"offset":24,"type":"jmp","opcode":"b 0x28","jump":40},
+            {"offset":36,"type":"mov","opcode":"mov w1, 0x4903"},
+            {"offset":40,"type":"call","opcode":"bl 0x630","jump":1584}
+        ]"#).unwrap();
+        let (i, _) = track_function("f", &ops, &[(0x630, 0x634)], false, &|_| None);
+        assert_eq!(i[0].request, Some(0x4901), "cmp/str must not clobber w1");
+        assert_eq!(i[1].request, None, "two paths reach the second call");
     }
 
     #[test]
