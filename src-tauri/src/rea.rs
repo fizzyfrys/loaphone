@@ -158,24 +158,7 @@ pub async fn patch_blob(
 pub async fn carve_firmware(app: tauri::AppHandle, codename: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let w = workspace(&app, &codename)?;
-        let root = w.join("blobs");
-        let mut count = 0;
-        for entry in walkdir::WalkDir::new(&root)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if entry.file_type().is_file() && firmware(&entry.path().to_string_lossy()) {
-                let dest = w.join("lib/firmware").join(
-                    entry
-                        .path()
-                        .strip_prefix(&root)
-                        .map_err(|e| e.to_string())?,
-                );
-                fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
-                fs::copy(entry.path(), dest).map_err(|e| e.to_string())?;
-                count += 1;
-            }
-        }
+        let count = copy_firmware(&w.join("blobs"), &w.join("lib/firmware"))?;
         Ok(format!(
             "Copied {count} firmware files. {}",
             if command("binwalk", &["--version"]).is_ok() {
@@ -187,6 +170,20 @@ pub async fn carve_firmware(app: tauri::AppHandle, codename: String) -> Result<S
     })
     .await
     .map_err(|e| e.to_string())?
+}
+pub(crate) fn copy_firmware(root: &Path, destination: &Path) -> Result<usize, String> {
+    let mut count = 0;
+    if !root.exists() { return Ok(count); }
+    for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_type().is_file() && firmware(&entry.path().to_string_lossy()) {
+            let dest = destination.join(entry.path().strip_prefix(root).map_err(|e| e.to_string())?);
+            fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+            fs::copy(entry.path(), dest).map_err(|e| e.to_string())?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 #[cfg(test)]
 mod tests {
